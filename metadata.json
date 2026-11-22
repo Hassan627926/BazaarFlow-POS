@@ -1,0 +1,6 @@
+{
+  "name": "BazaarFlow POS",
+  "description": "Multi-brand SaaS POS, inventory management, barcode label studio for retail shops, kitchen order billing for restaurants, thermal receipt printing, and owner analytics with daily exports for Windows and Android.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

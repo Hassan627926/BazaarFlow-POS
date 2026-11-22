@@ -1,0 +1,370 @@
+{
+  "entities": {
+    "Store": {
+      "title": "Store",
+      "description": "A brand workspace representing a retail shop or restaurant with custom branding, theme colors, logo, tax, and currency settings.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID of the store owner."
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "description": "Brand or shop display name."
+        },
+        "businessType": {
+          "type": "string",
+          "enum": ["retail", "restaurant"],
+          "description": "Store mode. Barcode generation is enabled exclusively for retail stores."
+        },
+        "logoDataUrl": {
+          "type": "string",
+          "maxLength": 120000,
+          "description": "Optional compressed brand logo image data URL."
+        },
+        "primaryColor": {
+          "type": "string",
+          "minLength": 7,
+          "maxLength": 7,
+          "pattern": "^#[0-9a-fA-F]{6}$",
+          "description": "Primary brand color in 6-digit hex format."
+        },
+        "accentColor": {
+          "type": "string",
+          "minLength": 7,
+          "maxLength": 7,
+          "pattern": "^#[0-9a-fA-F]{6}$",
+          "description": "Secondary accent color in 6-digit hex format."
+        },
+        "currency": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 10,
+          "description": "Currency symbol or code such as PKR, Rs., USD, AED."
+        },
+        "taxRate": {
+          "type": "number",
+          "description": "Default sales tax percentage (0 to 50)."
+        },
+        "address": {
+          "type": "string",
+          "maxLength": 200,
+          "description": "Store street address printed on bills."
+        },
+        "phone": {
+          "type": "string",
+          "maxLength": 32,
+          "description": "Store contact phone number printed on bills."
+        },
+        "receiptFooter": {
+          "type": "string",
+          "maxLength": 180,
+          "description": "Custom footer message printed on receipts."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of store creation."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of last update."
+        }
+      },
+      "required": [
+        "ownerId",
+        "name",
+        "businessType",
+        "logoDataUrl",
+        "primaryColor",
+        "accentColor",
+        "currency",
+        "taxRate",
+        "address",
+        "phone",
+        "receiptFooter",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Product": {
+      "title": "Product",
+      "description": "An inventory item or menu dish belonging to a store.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "storeId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "sku": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "barcode": {
+          "type": "string",
+          "maxLength": 48,
+          "description": "Barcode string for retail stores; empty string for restaurants."
+        },
+        "category": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 50
+        },
+        "costPrice": {
+          "type": "number"
+        },
+        "sellingPrice": {
+          "type": "number"
+        },
+        "stock": {
+          "type": "number"
+        },
+        "minStock": {
+          "type": "number"
+        },
+        "unit": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20
+        },
+        "active": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "ownerId",
+        "storeId",
+        "name",
+        "sku",
+        "barcode",
+        "category",
+        "costPrice",
+        "sellingPrice",
+        "stock",
+        "minStock",
+        "unit",
+        "active",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Sale": {
+      "title": "Sale",
+      "description": "A completed or voided POS invoice transaction.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "storeId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "invoiceNumber": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "dateKey": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 10,
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+        },
+        "items": {
+          "type": "array",
+          "description": "Bounded list (1 to 100) of purchased line items."
+        },
+        "itemCount": {
+          "type": "number"
+        },
+        "subtotal": {
+          "type": "number"
+        },
+        "discount": {
+          "type": "number"
+        },
+        "taxRate": {
+          "type": "number"
+        },
+        "taxAmount": {
+          "type": "number"
+        },
+        "total": {
+          "type": "number"
+        },
+        "totalCost": {
+          "type": "number"
+        },
+        "profit": {
+          "type": "number"
+        },
+        "paymentMethod": {
+          "type": "string",
+          "enum": ["cash", "card", "bank_qr"]
+        },
+        "amountTendered": {
+          "type": "number"
+        },
+        "changeDue": {
+          "type": "number"
+        },
+        "orderType": {
+          "type": "string",
+          "enum": ["retail", "dine_in", "takeaway", "delivery"]
+        },
+        "tableNumber": {
+          "type": "string",
+          "maxLength": 20
+        },
+        "customerName": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "status": {
+          "type": "string",
+          "enum": ["completed", "voided"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "ownerId",
+        "storeId",
+        "invoiceNumber",
+        "dateKey",
+        "items",
+        "itemCount",
+        "subtotal",
+        "discount",
+        "taxRate",
+        "taxAmount",
+        "total",
+        "totalCost",
+        "profit",
+        "paymentMethod",
+        "amountTendered",
+        "changeDue",
+        "orderType",
+        "tableNumber",
+        "customerName",
+        "status",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "StockLog": {
+      "title": "StockLog",
+      "description": "Immutable inventory stock adjustment audit record.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "storeId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "productId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "productName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "change": {
+          "type": "number"
+        },
+        "previousStock": {
+          "type": "number"
+        },
+        "newStock": {
+          "type": "number"
+        },
+        "reason": {
+          "type": "string",
+          "enum": ["restock", "sale", "void_restore", "damage", "adjustment"]
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "ownerId",
+        "storeId",
+        "productId",
+        "productName",
+        "change",
+        "previousStock",
+        "newStock",
+        "reason",
+        "note",
+        "createdAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/stores/{storeId}": {
+      "schema": { "$ref": "#/entities/Store" },
+      "description": "Multi-tenant brand/store workspaces owned by authenticated store owners."
+    },
+    "/stores/{storeId}/products/{productId}": {
+      "schema": { "$ref": "#/entities/Product" },
+      "description": "Inventory items and menu dishes scoped to a specific store."
+    },
+    "/stores/{storeId}/sales/{saleId}": {
+      "schema": { "$ref": "#/entities/Sale" },
+      "description": "Completed and voided POS sales invoices scoped to a specific store."
+    },
+    "/stores/{storeId}/stockLogs/{logId}": {
+      "schema": { "$ref": "#/entities/StockLog" },
+      "description": "Append-only stock movement audit logs scoped to a specific store."
+    }
+  }
+}
