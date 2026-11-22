@@ -547,6 +547,44 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
     setEditingOrder(true);
   };
 
+  const handlePrintProformaBill = (session: TableSession) => {
+    const subtotal = Number(session.subtotal.toFixed(2));
+    const taxRate = Number(store.taxRate || 0);
+    const taxAmount = Number(((subtotal * taxRate) / 100).toFixed(2));
+    const total = Number((subtotal + taxAmount).toFixed(2));
+    const billRef = `BILL-T${session.tableNumber}-${String(Date.now()).slice(-4)}`;
+
+    const proformaSale: Sale = {
+      id: generateSafeId('bill'),
+      ownerId: store.ownerId,
+      storeId: store.id,
+      invoiceNumber: billRef,
+      dateKey: getTodayDateKey(),
+      items: session.items,
+      itemCount: session.itemCount,
+      subtotal,
+      discount: 0,
+      taxRate,
+      taxAmount,
+      total,
+      totalCost: Number((session.totalCost || 0).toFixed(2)),
+      profit: Number((total - (session.totalCost || 0)).toFixed(2)),
+      paymentMethod: 'cash',
+      amountTendered: 0,
+      changeDue: 0,
+      orderType: 'dine_in',
+      tableNumber: session.tableNumber,
+      customerName: session.customerName || '',
+      employeeId: session.employeeId || effectiveWaiter.id,
+      employeeName: session.employeeName || effectiveWaiter.name,
+      status: 'completed',
+      createdAt: session.updatedAt ?? session.createdAt ?? null,
+      updatedAt: null,
+    };
+
+    onPrintJob({ type: 'receipt', sale: proformaSale, isProforma: true });
+  };
+
   const handleReprintKot = async (session: TableSession) => {
     if (!canPrintKot) return;
     const kotId = generateSafeId('kot');
@@ -1240,8 +1278,20 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
                 </div>
               </div>
 
-              {activeTableSession && !editingOrder && (canEditOrders || canPrintKot || canSettleBills) && (
+              {activeTableSession &&
+                !editingOrder &&
+                (canEditOrders || canPrintKot || canSettleBills || canViewPrices) && (
                 <div className="flex flex-wrap items-center gap-1.5">
+                  {(canViewPrices || canSettleBills) && (
+                    <button
+                      type="button"
+                      onClick={() => handlePrintProformaBill(activeTableSession)}
+                      className="inline-flex items-center gap-1 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-2.5 py-1.5 text-xs font-semibold text-slate-800 dark:text-slate-100 hover:bg-slate-50 dark:hover:bg-slate-700 cursor-pointer"
+                    >
+                      <Receipt className="w-3.5 h-3.5" />
+                      <span>Print Bill</span>
+                    </button>
+                  )}
                   {canSettleBills && (
                     <button
                       type="button"

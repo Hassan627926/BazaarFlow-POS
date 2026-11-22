@@ -35,7 +35,8 @@ function renderReceiptIntoDoc(
   store: StoreConfig,
   pageWidth: number,
   logoMeta: { width: number; height: number; format: 'PNG' | 'JPEG' | 'WEBP' } | null,
-  dryRun: boolean
+  dryRun: boolean,
+  isProforma = false
 ): number {
   const isNarrow = pageWidth <= 60;
   const margin = isNarrow ? 3.5 : 5;
@@ -133,7 +134,16 @@ function renderReceiptIntoDoc(
   drawDashedDivider();
 
   // Invoice & Order Metadata
-  drawKeyValue('Invoice', sale.invoiceNumber, true);
+  if (isProforma) {
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(baseFont);
+    if (!dryRun) {
+      doc.setTextColor(15, 23, 42);
+      doc.text('*** CUSTOMER BILL (UNPAID) ***', centerX, y + 0.5, { align: 'center' });
+    }
+    y += lineH + 1;
+  }
+  drawKeyValue(isProforma ? 'Bill Ref' : 'Invoice', sale.invoiceNumber, true);
   drawKeyValue('Date', formatDateTime(sale.createdAt));
 
   if (store.businessType === 'restaurant') {
@@ -154,7 +164,7 @@ function renderReceiptIntoDoc(
   if (sale.customerAddress) {
     drawKeyValue('Address', sale.customerAddress);
   }
-  if (sale.status === 'voided') {
+  if (!isProforma && sale.status === 'voided') {
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(baseFont);
     if (!dryRun) {
@@ -240,34 +250,43 @@ function renderReceiptIntoDoc(
   drawSolidDivider();
 
   drawKeyValue(
-    'GRAND TOTAL',
+    isProforma ? 'TOTAL PAYABLE' : 'GRAND TOTAL',
     formatMoney(sale.total, store.currency),
     true,
     isNarrow ? 9.5 : 10.5
   );
   y += 1;
 
-  // Payment, Cash Received & Change / Return (Baqaya)
-  if (sale.paymentMethod === 'cash') {
-    drawKeyValue(
-      'Cash Received',
-      formatMoney(sale.amountTendered, store.currency),
-      false,
-      baseFont
-    );
-    drawKeyValue(
-      'Change / Return',
-      formatMoney(sale.changeDue ?? 0, store.currency),
-      true,
-      baseFont
-    );
+  // Payment, Cash Received & Change / Return (omitted on unpaid pre-payment bills)
+  if (!isProforma) {
+    if (sale.paymentMethod === 'cash') {
+      drawKeyValue(
+        'Cash Received',
+        formatMoney(sale.amountTendered, store.currency),
+        false,
+        baseFont
+      );
+      drawKeyValue(
+        'Change / Return',
+        formatMoney(sale.changeDue ?? 0, store.currency),
+        true,
+        baseFont
+      );
+    } else {
+      drawKeyValue(
+        `Payment (${sale.paymentMethod.replace('_', '/').toUpperCase()})`,
+        formatMoney(sale.amountTendered, store.currency),
+        false,
+        baseFont
+      );
+    }
   } else {
-    drawKeyValue(
-      `Payment (${sale.paymentMethod.replace('_', '/').toUpperCase()})`,
-      formatMoney(sale.amountTendered, store.currency),
-      false,
-      baseFont
-    );
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(smallFont);
+    if (!dryRun) {
+      doc.text('Payment Pending — Please pay at table or counter', centerX, y + 0.5, { align: 'center' });
+    }
+    y += lineH;
   }
 
   drawDashedDivider();
@@ -289,7 +308,8 @@ function renderReceiptIntoDoc(
 export async function generateReceiptPdfFile(
   sale: Sale,
   store: StoreConfig,
-  paperWidth: '80mm' | '58mm'
+  paperWidth: '80mm' | '58mm',
+  isProforma = false
 ): Promise<{ blob: Blob; file: File; filename: string }> {
   const widthMm = paperWidth === '58mm' ? 58 : 80;
   const logoMeta = store.logoDataUrl ? await loadImageDimensions(store.logoDataUrl) : null;
@@ -300,7 +320,10 @@ export async function generateReceiptPdfFile(
     unit: 'mm',
     format: [widthMm, 260],
   });
-  const totalHeight = Math.max(80, Math.ceil(renderReceiptIntoDoc(measureDoc, sale, store, widthMm, logoMeta, true)));
+  const totalHeight = Math.max(
+    80,
+    Math.ceil(renderReceiptIntoDoc(measureDoc, sale, store, widthMm, logoMeta, true, isProforma))
+  );
 
   // Second pass: render crisp vector PDF at exact receipt height
   const pdf = new jsPDF({
@@ -308,7 +331,7 @@ export async function generateReceiptPdfFile(
     unit: 'mm',
     format: [widthMm, totalHeight],
   });
-  renderReceiptIntoDoc(pdf, sale, store, widthMm, logoMeta, false);
+  renderReceiptIntoDoc(pdf, sale, store, widthMm, logoMeta, false, isProforma);
 
   const safeInv = sale.invoiceNumber.replace(/[^a-zA-Z0-9_-]/g, '_');
   const filename = `${safeInv}.pdf`;

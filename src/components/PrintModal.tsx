@@ -25,13 +25,16 @@ function formatWhatsAppNumber(raw: string, currency: string): string {
   return digits;
 }
 
-function buildWhatsAppReceiptText(sale: Sale, store: StoreConfig): string {
+function buildWhatsAppReceiptText(sale: Sale, store: StoreConfig, isProforma = false): string {
   const lines: string[] = [];
   lines.push(`*${store.name}*`);
   if (store.address) lines.push(store.address);
   if (store.phone) lines.push(`Tel: ${store.phone}`);
   lines.push('────────────────────');
-  lines.push(`*Invoice:* ${sale.invoiceNumber}`);
+  if (isProforma) {
+    lines.push('*CUSTOMER BILL (UNPAID)*');
+  }
+  lines.push(`*${isProforma ? 'Bill Ref' : 'Invoice'}:* ${sale.invoiceNumber}`);
   lines.push(`*Date:* ${formatDateTime(sale.createdAt)}`);
   if (store.businessType === 'restaurant') {
     const orderLabel = sale.orderType.replace('_', ' ').toUpperCase();
@@ -41,7 +44,7 @@ function buildWhatsAppReceiptText(sale: Sale, store: StoreConfig): string {
   if (sale.customerName) lines.push(`*Customer:* ${sale.customerName}`);
   if (sale.customerPhone) lines.push(`*Phone:* ${sale.customerPhone}`);
   if (sale.customerAddress) lines.push(`*Address:* ${sale.customerAddress}`);
-  if (sale.status === 'voided') lines.push('*STATUS: VOIDED RECEIPT*');
+  if (!isProforma && sale.status === 'voided') lines.push('*STATUS: VOIDED RECEIPT*');
   lines.push('────────────────────');
   lines.push('*Items:*');
   sale.items.forEach((item, idx) => {
@@ -59,17 +62,21 @@ function buildWhatsAppReceiptText(sale: Sale, store: StoreConfig): string {
   if (sale.discount > 0) {
     lines.push(`Discount: -${formatMoney(sale.discount, store.currency)}`);
   }
-  lines.push(`*GRAND TOTAL: ${formatMoney(sale.total, store.currency)}*`);
-  if (sale.paymentMethod === 'cash') {
-    lines.push(`Cash Received: ${formatMoney(sale.amountTendered, store.currency)}`);
-    lines.push(`*Change / Return: ${formatMoney(sale.changeDue ?? 0, store.currency)}*`);
+  lines.push(`*${isProforma ? 'TOTAL PAYABLE' : 'GRAND TOTAL'}: ${formatMoney(sale.total, store.currency)}*`);
+  if (!isProforma) {
+    if (sale.paymentMethod === 'cash') {
+      lines.push(`Cash Received: ${formatMoney(sale.amountTendered, store.currency)}`);
+      lines.push(`*Change / Return: ${formatMoney(sale.changeDue ?? 0, store.currency)}*`);
+    } else {
+      lines.push(
+        `Payment (${sale.paymentMethod.replace('_', '/').toUpperCase()}): ${formatMoney(
+          sale.amountTendered,
+          store.currency
+        )}`
+      );
+    }
   } else {
-    lines.push(
-      `Payment (${sale.paymentMethod.replace('_', '/').toUpperCase()}): ${formatMoney(
-        sale.amountTendered,
-        store.currency
-      )}`
-    );
+    lines.push('_Payment Pending_');
   }
   lines.push('────────────────────');
   lines.push(store.receiptFooter || 'Thank you for your business!');
@@ -137,8 +144,10 @@ export const PrintModal: React.FC<PrintModalProps> = ({
     window.print();
   };
 
+  const isProformaReceipt = job.type === 'receipt' && !!job.isProforma;
+
   const receiptWhatsAppText =
-    job.type === 'receipt' ? buildWhatsAppReceiptText(job.sale, store) : '';
+    job.type === 'receipt' ? buildWhatsAppReceiptText(job.sale, store, isProformaReceipt) : '';
   const formattedWaDigits =
     job.type === 'receipt' ? formatWhatsAppNumber(whatsappPhone, store.currency) : '';
   const whatsappTextUrl =
@@ -147,7 +156,9 @@ export const PrintModal: React.FC<PrintModalProps> = ({
       : '';
   const whatsappPdfCaption =
     job.type === 'receipt'
-      ? `Bill ${job.sale.invoiceNumber} from ${store.name} — Grand Total: ${formatMoney(
+      ? `${isProformaReceipt ? 'Customer Bill (Unpaid)' : 'Bill'} ${job.sale.invoiceNumber} from ${
+          store.name
+        } — ${isProformaReceipt ? 'Total Payable' : 'Grand Total'}: ${formatMoney(
           job.sale.total,
           store.currency
         )}. Please find the attached PDF bill.`
@@ -162,7 +173,12 @@ export const PrintModal: React.FC<PrintModalProps> = ({
     setPdfBusy(true);
     setPdfError(null);
     try {
-      const { blob, filename } = await generateReceiptPdfFile(job.sale, store, paperWidth);
+      const { blob, filename } = await generateReceiptPdfFile(
+        job.sale,
+        store,
+        paperWidth,
+        isProformaReceipt
+      );
       triggerPdfDownload(blob, filename);
       setPdfNotice({ filename, mode: 'downloaded' });
     } catch {
@@ -179,7 +195,12 @@ export const PrintModal: React.FC<PrintModalProps> = ({
     setPdfNotice(null);
 
     try {
-      const { blob, file, filename } = await generateReceiptPdfFile(job.sale, store, paperWidth);
+      const { blob, file, filename } = await generateReceiptPdfFile(
+        job.sale,
+        store,
+        paperWidth,
+        isProformaReceipt
+      );
 
       // On Mobile (Android / iOS) & Web Share File-capable devices, share the real .pdf file directly to WhatsApp
       const nav = navigator as Navigator & {
@@ -213,7 +234,10 @@ export const PrintModal: React.FC<PrintModalProps> = ({
     }
   };
 
-  const renderReceipt = (sale: Extract<PrintJob, { type: 'receipt' }>['sale']) => {
+  const renderReceipt = (
+    sale: Extract<PrintJob, { type: 'receipt' }>['sale'],
+    isProforma = false
+  ) => {
     const isNarrow = paperWidth === '58mm';
     return (
       <div
@@ -233,11 +257,16 @@ export const PrintModal: React.FC<PrintModalProps> = ({
           <div className="text-base font-bold font-display tracking-tight">{store.name}</div>
           {store.address && <div className="text-[11px] text-slate-600 mt-0.5">{store.address}</div>}
           {store.phone && <div className="text-[11px] text-slate-600">Tel: {store.phone}</div>}
+          {isProforma && (
+            <div className="mt-2 py-1 border-y border-slate-900 text-[11px] font-bold tracking-wider uppercase">
+              CUSTOMER BILL (UNPAID)
+            </div>
+          )}
         </div>
 
         <div className="py-2.5 border-b border-dashed border-slate-300 space-y-1 text-[11px]">
           <div className="flex justify-between">
-            <span>Invoice</span>
+            <span>{isProforma ? 'Bill Ref' : 'Invoice'}</span>
             <span className="font-semibold">{sale.invoiceNumber}</span>
           </div>
           <div className="flex justify-between">
@@ -277,7 +306,7 @@ export const PrintModal: React.FC<PrintModalProps> = ({
               <span className="text-right">{sale.customerAddress}</span>
             </div>
           )}
-          {sale.status === 'voided' && (
+          {!isProforma && sale.status === 'voided' && (
             <div className="text-center font-bold text-red-700 pt-1">*** VOIDED RECEIPT ***</div>
           )}
         </div>
@@ -324,10 +353,14 @@ export const PrintModal: React.FC<PrintModalProps> = ({
             </div>
           )}
           <div className="flex justify-between border-t border-slate-300 pt-1.5 text-sm font-bold">
-            <span>GRAND TOTAL</span>
+            <span>{isProforma ? 'TOTAL PAYABLE' : 'GRAND TOTAL'}</span>
             <span className="tabular-nums">{formatMoney(sale.total, store.currency)}</span>
           </div>
-          {sale.paymentMethod === 'cash' ? (
+          {isProforma ? (
+            <div className="pt-1.5 text-center text-[11px] font-semibold text-slate-700">
+              Payment Pending — Please pay at table or counter
+            </div>
+          ) : sale.paymentMethod === 'cash' ? (
             <>
               <div className="flex justify-between pt-1">
                 <span>Cash Received</span>
@@ -611,7 +644,8 @@ export const PrintModal: React.FC<PrintModalProps> = ({
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-5 py-3.5 no-print">
           <div className="flex items-center gap-3">
             <h3 className="text-base font-semibold text-slate-900 dark:text-slate-100">
-              {job.type === 'receipt' && 'Print Sales Bill'}
+              {job.type === 'receipt' &&
+                (job.isProforma ? 'Customer Bill (Unpaid)' : 'Print Sales Bill')}
               {job.type === 'kot' && 'Kitchen Order Ticket (KOT)'}
               {job.type === 'barcodes' && 'Print Retail Barcode Labels'}
               {job.type === 'daily_report' && `Daily Summary Z-Report · ${job.dateKey}`}
@@ -643,7 +677,15 @@ export const PrintModal: React.FC<PrintModalProps> = ({
               className="inline-flex items-center gap-2 rounded-lg brand-bg px-4 py-2 text-xs font-semibold text-white whitespace-nowrap shrink-0 cursor-pointer"
             >
               <Printer className="w-4 h-4" />
-              <span>Print / Save PDF</span>
+              <span>
+                {job.type === 'kot'
+                  ? 'Print KOT'
+                  : job.type === 'receipt'
+                  ? 'Print Bill'
+                  : job.type === 'barcodes'
+                  ? 'Print Labels'
+                  : 'Print Report'}
+              </span>
             </button>
             <button
               type="button"
@@ -735,7 +777,7 @@ export const PrintModal: React.FC<PrintModalProps> = ({
         )}
 
         <div className="p-5 max-h-[78vh] overflow-y-auto print:max-h-none print:overflow-visible print:p-0">
-          {job.type === 'receipt' && renderReceipt(job.sale)}
+          {job.type === 'receipt' && renderReceipt(job.sale, isProformaReceipt)}
           {job.type === 'kot' && renderKOT(job.sale, job.isAddOn, job.isRevised, job.changeNotes)}
           {job.type === 'barcodes' && renderBarcodeSheet(job.labels)}
           {job.type === 'daily_report' && renderDailyReport(job.dateKey, job.sales, job.products)}

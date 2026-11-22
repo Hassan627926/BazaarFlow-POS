@@ -245,7 +245,7 @@ export interface BarcodeLabelPrintItem {
 }
 
 export type PrintJob =
-  | { type: 'receipt'; sale: Sale }
+  | { type: 'receipt'; sale: Sale; isProforma?: boolean }
   | {
       type: 'kot';
       sale: Sale;
