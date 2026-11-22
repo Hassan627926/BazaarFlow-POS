@@ -29,7 +29,7 @@ import firebaseConfig from '../../firebase-applet-config.json';
 import { PWAInstallButton } from './PWAInstallButton';
 
 interface AuthScreenProps {
-  onSignedIn?: (user: User) => void;
+  onSignedIn?: (user: User, mode: 'owner' | 'waiter') => void;
 }
 
 export const AuthScreen: React.FC<AuthScreenProps> = ({ onSignedIn }) => {
@@ -44,8 +44,18 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onSignedIn }) => {
   const [notice, setNotice] = useState<string | null>(null);
   const [loginMode, setLoginMode] = useState<'owner' | 'waiter'>(() => {
     if (typeof window === 'undefined') return 'owner';
-    return new URLSearchParams(window.location.search).get('mode') === 'waiter' ? 'waiter' : 'owner';
+    if (new URLSearchParams(window.location.search).get('mode') === 'waiter') return 'waiter';
+    return window.sessionStorage.getItem('bazaarflow_login_mode') === 'waiter' ? 'waiter' : 'owner';
   });
+
+  const handleSelectLoginMode = (mode: 'owner' | 'waiter') => {
+    setLoginMode(mode);
+    setError(null);
+    setNotice(null);
+    if (typeof window !== 'undefined') {
+      window.sessionStorage.setItem('bazaarflow_login_mode', mode);
+    }
+  };
 
   const firebaseAuthConsoleUrl = `https://console.firebase.google.com/project/${firebaseConfig.projectId}/authentication/providers`;
 
@@ -83,10 +93,13 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onSignedIn }) => {
     setNotice(null);
 
     try {
+      if (typeof window !== 'undefined') {
+        window.sessionStorage.setItem('bazaarflow_login_mode', loginMode);
+      }
       await ensurePersistence();
       const credential = await signInWithEmailAndPassword(auth, cleanEmail, password);
       if (credential?.user && onSignedIn) {
-        onSignedIn(credential.user);
+        onSignedIn(credential.user, loginMode);
       }
     } catch (err: unknown) {
       const code =
@@ -155,10 +168,13 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onSignedIn }) => {
     setNotice(null);
 
     try {
+      if (typeof window !== 'undefined') {
+        window.sessionStorage.setItem('bazaarflow_login_mode', loginMode);
+      }
       await ensurePersistence();
       const credential = await signInWithPopup(auth, googleProvider);
       if (credential?.user && onSignedIn) {
-        onSignedIn(credential.user);
+        onSignedIn(credential.user, loginMode);
       }
     } catch (err: unknown) {
       const code =
@@ -280,7 +296,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onSignedIn }) => {
             <div className="grid grid-cols-2 gap-1 p-1 rounded-lg bg-slate-100 dark:bg-slate-800 mb-5">
               <button
                 type="button"
-                onClick={() => setLoginMode('owner')}
+                onClick={() => handleSelectLoginMode('owner')}
                 className={`flex items-center justify-center gap-1.5 rounded-md py-2 text-xs font-semibold transition-colors cursor-pointer ${
                   loginMode === 'owner'
                     ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 shadow-xs'
@@ -292,7 +308,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onSignedIn }) => {
               </button>
               <button
                 type="button"
-                onClick={() => setLoginMode('waiter')}
+                onClick={() => handleSelectLoginMode('waiter')}
                 className={`flex items-center justify-center gap-1.5 rounded-md py-2 text-xs font-semibold transition-colors cursor-pointer ${
                   loginMode === 'waiter'
                     ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 shadow-xs'
@@ -309,7 +325,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onSignedIn }) => {
             </h2>
             <p className="mt-1.5 text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
               {loginMode === 'waiter'
-                ? 'Sign in with your email & password, or continue with Google on your first login to create a password.'
+                ? 'Sign in with the Email & Password created by your restaurant owner (under Employees / Staff). Your restaurant tables & menu will open directly.'
                 : 'Sign in with your email & password, or continue with Google on your first login to set a password.'}
             </p>
 

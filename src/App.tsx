@@ -1,8 +1,9 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { getRedirectResult, onAuthStateChanged, signOut, type User } from 'firebase/auth';
 import {
   BarChart3,
   Barcode,
+  Bell,
   ChevronDown,
   KeyRound,
   LogOut,
@@ -10,6 +11,7 @@ import {
   Moon,
   Package,
   Plus,
+  Printer,
   Receipt,
   Settings,
   ShoppingCart,
@@ -37,6 +39,7 @@ import {
   type AppTab,
   type Customer,
   type Employee,
+  type KotTicket,
   type PrintJob,
   type Product,
   type Sale,
@@ -47,9 +50,11 @@ import {
 } from './types';
 import {
   generateSafeId,
+  getTodayDateKey,
   RESTAURANT_STARTER_PRODUCTS,
   RETAIL_STARTER_PRODUCTS,
 } from './utils/posHelpers';
+import { playKitchenBellChime } from './utils/soundAlert';
 import { AnalyticsView } from './components/AnalyticsView';
 import { AuthScreen } from './components/AuthScreen';
 import { BarcodeStudioView } from './components/BarcodeStudioView';
@@ -57,6 +62,7 @@ import { BillingView } from './components/BillingView';
 import { EmployeesView } from './components/EmployeesView';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { InventoryView } from './components/InventoryView';
+import { KitchenKotQueueView } from './components/KitchenKotQueueView';
 import { OfflineIndicator } from './components/OfflineIndicator';
 import { PasswordSetupModal } from './components/PasswordSetupModal';
 import { PrintModal } from './components/PrintModal';
@@ -82,16 +88,55 @@ function POSWorkspace() {
   const [tableSessions, setTableSessions] = useState<TableSession[]>([]);
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [employees, setEmployees] = useState<Employee[]>([]);
+  const [kotTickets, setKotTickets] = useState<KotTicket[]>([]);
 
-  const [activeTab, setActiveTab] = useState<AppTab>('billing');
+  const [activeTab, setActiveTab] = useState<AppTab>(() => {
+    if (typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('station') === 'kot') {
+      return 'kot_queue';
+    }
+    return 'billing';
+  });
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [printJob, setPrintJob] = useState<PrintJob | null>(null);
   const [boundaryError, setBoundaryError] = useState<Error | null>(null);
 
+  // Live Kitchen KOT Sound & Window-Scoped Auto-Print Station state
+  const [kotSoundEnabled, setKotSoundEnabled] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return true;
+    const saved = window.localStorage.getItem('bazaarflow_kot_sound');
+    return saved === null ? true : saved === '1';
+  });
+  const [kotAutoPrint, setKotAutoPrint] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    if (new URLSearchParams(window.location.search).get('station') === 'kot') return true;
+    return window.sessionStorage.getItem('bazaarflow_kot_autoprint') === '1';
+  });
+  const kotSoundEnabledRef = useRef(kotSoundEnabled);
+  const kotHydratedRef = useRef(false);
+  const seenPendingKotIdsRef = useRef<Set<string>>(new Set());
+  const autoDispatchedKotIdsRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    kotSoundEnabledRef.current = kotSoundEnabled;
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem('bazaarflow_kot_sound', kotSoundEnabled ? '1' : '0');
+    }
+  }, [kotSoundEnabled]);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      window.sessionStorage.setItem('bazaarflow_kot_autoprint', kotAutoPrint ? '1' : '0');
+    }
+    if (!kotAutoPrint) {
+      autoDispatchedKotIdsRef.current.clear();
+    }
+  }, [kotAutoPrint]);
+
   // Waiter Mobile App access state
   const [preferWaiterMode, setPreferWaiterMode] = useState<boolean>(() => {
     if (typeof window === 'undefined') return false;
-    return new URLSearchParams(window.location.search).get('mode') === 'waiter';
+    if (new URLSearchParams(window.location.search).get('mode') === 'waiter') return true;
+    return window.sessionStorage.getItem('bazaarflow_login_mode') === 'waiter';
   });
   const [waiterGrants, setWaiterGrants] = useState<WaiterAccess[]>([]);
   const [waiterGrantsLoaded, setWaiterGrantsLoaded] = useState(false);
@@ -179,7 +224,13 @@ function POSWorkspace() {
     const unsub = onAuthStateChanged(auth, (nextUser) => {
       setUser(nextUser);
       setAuthReady(true);
-      if (!nextUser) {
+      if (nextUser) {
+        if (typeof window !== 'undefined') {
+          const urlWaiter = new URLSearchParams(window.location.search).get('mode') === 'waiter';
+          const storedWaiter = window.sessionStorage.getItem('bazaarflow_login_mode') === 'waiter';
+          setPreferWaiterMode(urlWaiter || storedWaiter);
+        }
+      } else {
         setStores([]);
         setStoresLoaded(false);
         setActiveStoreId(null);
@@ -189,6 +240,10 @@ function POSWorkspace() {
         setTableSessions([]);
         setCustomers([]);
         setEmployees([]);
+        setKotTickets([]);
+        kotHydratedRef.current = false;
+        seenPendingKotIdsRef.current.clear();
+        autoDispatchedKotIdsRef.current.clear();
         setWaiterGrants([]);
         setWaiterGrantsLoaded(false);
         setWaiterMemberReady(false);
@@ -294,14 +349,22 @@ function POSWorkspace() {
       try {
         const snap = await getDoc(memberRef);
         if (snap.exists()) {
-          await updateDoc(memberRef, {
-            accessId: activeWaiterGrant.id,
-            employeeId: activeWaiterGrant.employeeId,
-            employeeName: activeWaiterGrant.employeeName,
-            waiterEmail: emailLower,
-            active: true,
-            updatedAt: serverTimestamp(),
-          });
+          const data = snap.data();
+          const alreadySynced =
+            data?.active === true &&
+            data?.accessId === activeWaiterGrant.id &&
+            data?.employeeId === activeWaiterGrant.employeeId &&
+            data?.waiterEmail === emailLower;
+          if (!alreadySynced) {
+            await updateDoc(memberRef, {
+              accessId: activeWaiterGrant.id,
+              employeeId: activeWaiterGrant.employeeId,
+              employeeName: activeWaiterGrant.employeeName,
+              waiterEmail: emailLower,
+              active: true,
+              updatedAt: serverTimestamp(),
+            });
+          }
         } else {
           await setDoc(memberRef, {
             ownerId: activeWaiterGrant.ownerId,
@@ -321,8 +384,12 @@ function POSWorkspace() {
         }
       } catch (err) {
         if (!cancelled) {
+          const rawMsg =
+            err instanceof Error ? err.message : 'Unable to activate waiter mobile session.';
           setWaiterSyncError(
-            err instanceof Error ? err.message : 'Unable to activate waiter mobile session.'
+            rawMsg.toLowerCase().includes('permission')
+              ? 'First-time waiter activation requires Google Sign-In once (or ask your restaurant owner to create your Waiter Account directly inside Owner POS → Employees / Staff).'
+              : rawMsg
           );
         }
       }
@@ -422,15 +489,18 @@ function POSWorkspace() {
     document.documentElement.style.setProperty('--brand-primary', activeStore.primaryColor);
     document.documentElement.style.setProperty('--brand-accent', activeStore.accentColor);
 
-    // Ensure Restaurant stores never stay on Retail-only Barcode tab, and Retail stores never stay on Waiter tab
+    // Ensure Restaurant stores never stay on Retail-only Barcode tab, and Retail stores never stay on Restaurant-only tabs
     if (activeStore.businessType === 'restaurant' && activeTab === 'barcodes') {
       setActiveTab('billing');
-    } else if (activeStore.businessType === 'retail' && activeTab === 'waiter') {
+    } else if (
+      activeStore.businessType === 'retail' &&
+      (activeTab === 'waiter' || activeTab === 'kot_queue')
+    ) {
       setActiveTab('billing');
     }
   }, [activeStore, activeTab, isStandaloneWaiterMode]);
 
-  // Subscribe to active store's products, sales, stockLogs, tables, customers, and employees
+  // Subscribe to active store's products, sales, stockLogs, tables, customers, employees, and kotQueue
   useEffect(() => {
     if (!user || !activeStoreId || isStandaloneWaiterMode) {
       setProducts([]);
@@ -439,8 +509,16 @@ function POSWorkspace() {
       setTableSessions([]);
       setCustomers([]);
       setEmployees([]);
+      setKotTickets([]);
+      kotHydratedRef.current = false;
+      seenPendingKotIdsRef.current.clear();
+      autoDispatchedKotIdsRef.current.clear();
       return;
     }
+
+    kotHydratedRef.current = false;
+    seenPendingKotIdsRef.current.clear();
+    autoDispatchedKotIdsRef.current.clear();
 
     const productsPath = `stores/${activeStoreId}/products`;
     const salesPath = `stores/${activeStoreId}/sales`;
@@ -448,6 +526,7 @@ function POSWorkspace() {
     const tablesPath = `stores/${activeStoreId}/tables`;
     const customersPath = `stores/${activeStoreId}/customers`;
     const employeesPath = `stores/${activeStoreId}/employees`;
+    const kotQueuePath = `stores/${activeStoreId}/kotQueue`;
 
     const unsubProducts = onSnapshot(
       query(collection(db, productsPath), where('ownerId', '==', user.uid)),
@@ -534,6 +613,35 @@ function POSWorkspace() {
       (err) => reportSnapshotError(err, OperationType.LIST, employeesPath)
     );
 
+    const unsubKotQueue = onSnapshot(
+      query(collection(db, kotQueuePath), where('ownerId', '==', user.uid)),
+      (snap) => {
+        const list: KotTicket[] = snap.docs.map((d) => ({
+          id: d.id,
+          ...(d.data() as Omit<KotTicket, 'id'>),
+        }));
+        setKotTickets(list);
+
+        const pendingList = list.filter((t) => t.status === 'pending');
+        if (!kotHydratedRef.current) {
+          pendingList.forEach((t) => seenPendingKotIdsRef.current.add(t.id));
+          kotHydratedRef.current = true;
+        } else {
+          let hasNewPending = false;
+          for (const t of pendingList) {
+            if (!seenPendingKotIdsRef.current.has(t.id)) {
+              seenPendingKotIdsRef.current.add(t.id);
+              hasNewPending = true;
+            }
+          }
+          if (hasNewPending && kotSoundEnabledRef.current) {
+            playKitchenBellChime();
+          }
+        }
+      },
+      (err) => reportSnapshotError(err, OperationType.LIST, kotQueuePath)
+    );
+
     return () => {
       unsubProducts();
       unsubSales();
@@ -541,8 +649,117 @@ function POSWorkspace() {
       unsubTables();
       unsubCustomers();
       unsubEmployees();
+      unsubKotQueue();
     };
   }, [user, activeStoreId, isStandaloneWaiterMode]);
+
+  const pendingKotTickets = useMemo(() => {
+    return kotTickets
+      .filter((t) => t.status === 'pending')
+      .sort((a, b) => (a.createdAt?.toMillis?.() ?? 0) - (b.createdAt?.toMillis?.() ?? 0));
+  }, [kotTickets]);
+
+  const buildPrintJobFromKot = useCallback(
+    (ticket: KotTicket, autoPrint = false): Extract<PrintJob, { type: 'kot' }> => {
+      const subtotal = ticket.items.reduce((sum, i) => sum + i.lineTotal, 0);
+      const totalCost = ticket.items.reduce((sum, i) => sum + i.costPrice * i.quantity, 0);
+      const kotSale: Sale = {
+        id: ticket.id,
+        ownerId: ticket.ownerId,
+        storeId: ticket.storeId,
+        invoiceNumber: ticket.ticketNumber,
+        dateKey: getTodayDateKey(),
+        items: ticket.items,
+        itemCount: ticket.itemCount,
+        subtotal,
+        discount: 0,
+        taxRate: 0,
+        taxAmount: 0,
+        total: subtotal,
+        totalCost,
+        profit: subtotal - totalCost,
+        paymentMethod: 'cash',
+        amountTendered: 0,
+        changeDue: 0,
+        orderType: ticket.orderType,
+        tableNumber: ticket.tableNumber,
+        customerName: ticket.customerName,
+        employeeId: ticket.employeeId,
+        employeeName: ticket.employeeName,
+        status: 'completed',
+        createdAt: ticket.createdAt ?? null,
+        updatedAt: ticket.updatedAt ?? null,
+      };
+      return {
+        type: 'kot',
+        sale: kotSale,
+        isAddOn: ticket.ticketKind === 'addon',
+        isRevised: ticket.ticketKind === 'revised',
+        changeNotes: ticket.changeNotes,
+        kotId: ticket.id,
+        autoPrint,
+      };
+    },
+    []
+  );
+
+  const handleMarkKotPrinted = useCallback(
+    async (kotId: string) => {
+      if (!activeStoreId) return;
+      const path = `stores/${activeStoreId}/kotQueue/${kotId}`;
+      try {
+        await updateDoc(doc(db, 'stores', activeStoreId, 'kotQueue', kotId), {
+          status: 'printed',
+          updatedAt: serverTimestamp(),
+        });
+      } catch (err) {
+        reportSnapshotError(err, OperationType.UPDATE, path);
+      }
+    },
+    [activeStoreId]
+  );
+
+  const handleClearPrintedKots = useCallback(async () => {
+    if (!activeStoreId) return;
+    const printed = kotTickets.filter((t) => t.status === 'printed');
+    if (printed.length === 0) return;
+    const path = `stores/${activeStoreId}/kotQueue`;
+    try {
+      const batch = writeBatch(db);
+      printed.slice(0, 400).forEach((ticket) => {
+        batch.delete(doc(db, 'stores', activeStoreId, 'kotQueue', ticket.id));
+      });
+      await batch.commit();
+    } catch (err) {
+      reportSnapshotError(err, OperationType.DELETE, path);
+    }
+  }, [activeStoreId, kotTickets]);
+
+  const handlePrintKotTicket = useCallback(
+    (ticket: KotTicket, autoPrint = false) => {
+      setPrintJob(buildPrintJobFromKot(ticket, autoPrint));
+    },
+    [buildPrintJobFromKot]
+  );
+
+  // Auto-Print Station loop: prints pending KOTs FIFO one by one when enabled in this browser window
+  useEffect(() => {
+    if (
+      !kotAutoPrint ||
+      !activeStore ||
+      activeStore.businessType !== 'restaurant' ||
+      isStandaloneWaiterMode ||
+      printJob
+    ) {
+      return;
+    }
+    const nextTicket = pendingKotTickets.find(
+      (t) => !autoDispatchedKotIdsRef.current.has(t.id)
+    );
+    if (!nextTicket) return;
+    autoDispatchedKotIdsRef.current.add(nextTicket.id);
+    setPrintJob(buildPrintJobFromKot(nextTicket, true));
+  }, [kotAutoPrint, activeStore, isStandaloneWaiterMode, printJob, pendingKotTickets, buildPrintJobFromKot]);
 
   const handleCreateStore = async (payload: NewStorePayload) => {
     if (!user) return;
@@ -617,7 +834,15 @@ function POSWorkspace() {
   if (!user) {
     return (
       <>
-        <AuthScreen onSignedIn={(signedInUser) => setUser(signedInUser)} />
+        <AuthScreen
+          onSignedIn={(signedInUser, mode) => {
+            if (typeof window !== 'undefined') {
+              window.sessionStorage.setItem('bazaarflow_login_mode', mode);
+            }
+            setPreferWaiterMode(mode === 'waiter');
+            setUser(signedInUser);
+          }}
+        />
         <OfflineIndicator />
       </>
     );
@@ -651,7 +876,12 @@ function POSWorkspace() {
               {stores.length > 0 && (
                 <button
                   type="button"
-                  onClick={() => setPreferWaiterMode(false)}
+                  onClick={() => {
+                    if (typeof window !== 'undefined') {
+                      window.sessionStorage.setItem('bazaarflow_login_mode', 'owner');
+                    }
+                    setPreferWaiterMode(false);
+                  }}
                   className="rounded-lg border border-slate-200 dark:border-slate-700 px-4 py-2 text-xs font-semibold text-slate-700 dark:text-slate-200 cursor-pointer"
                 >
                   Switch to Owner POS
@@ -697,7 +927,16 @@ function POSWorkspace() {
           darkMode={darkMode}
           onToggleDarkMode={() => setDarkMode((v) => !v)}
           onSignOut={() => void signOut(auth)}
-          onSwitchToOwner={stores.length > 0 ? () => setPreferWaiterMode(false) : undefined}
+          onSwitchToOwner={
+            stores.length > 0
+              ? () => {
+                  if (typeof window !== 'undefined') {
+                    window.sessionStorage.setItem('bazaarflow_login_mode', 'owner');
+                  }
+                  setPreferWaiterMode(false);
+                }
+              : undefined
+          }
           hasPassword={hasPasswordProvider}
           onOpenPasswordSetup={() => setPasswordModalOpen(true)}
           onPrintJob={setPrintJob}
@@ -715,8 +954,8 @@ function POSWorkspace() {
     );
   }
 
-  // Opened via ?mode=waiter with a Google account that does not have active Waiter Access yet
-  if (preferWaiterMode && !activeWaiterGrant && stores.length === 0) {
+  // Signed in via Waiter Mobile mode with an account that does not have active Waiter Access yet
+  if (preferWaiterMode && !activeWaiterGrant) {
     return (
       <div className="min-h-screen bg-slate-50 dark:bg-slate-950 flex items-center justify-center p-4">
         <div className="max-w-md w-full rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-6 sm:p-7 space-y-4 text-center">
@@ -731,7 +970,8 @@ function POSWorkspace() {
             <span className="font-mono font-semibold text-slate-900 dark:text-slate-100">
               {user.email}
             </span>
-            . Ask your restaurant owner to open <strong>Employees / Staff</strong>, add this exact Gmail address, and turn ON <strong>Waiter Mobile App Access</strong>.
+            . Waiter accounts must be created or enabled inside your restaurant owner&apos;s POS under{' '}
+            <strong>Employees / Staff → Create Waiter Account</strong> using this exact email address.
           </p>
           <div className="flex flex-col gap-2 pt-2">
             <button
@@ -739,18 +979,22 @@ function POSWorkspace() {
               onClick={() => void signOut(auth)}
               className="w-full rounded-lg bg-slate-900 dark:bg-slate-100 px-4 py-2.5 text-xs font-semibold text-white dark:text-slate-900 cursor-pointer"
             >
-              Sign Out / Switch Google Account
+              Sign Out / Switch Account
             </button>
-            <button
-              type="button"
-              onClick={() => {
-                setPreferWaiterMode(false);
-                setCreateStoreOpen(true);
-              }}
-              className="w-full rounded-lg border border-slate-200 dark:border-slate-700 px-4 py-2.5 text-xs font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
-            >
-              I am a Restaurant Owner — Set Up My Own Store
-            </button>
+            {stores.length > 0 && (
+              <button
+                type="button"
+                onClick={() => {
+                  if (typeof window !== 'undefined') {
+                    window.sessionStorage.setItem('bazaarflow_login_mode', 'owner');
+                  }
+                  setPreferWaiterMode(false);
+                }}
+                className="w-full rounded-lg border border-slate-200 dark:border-slate-700 px-4 py-2.5 text-xs font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
+              >
+                Open My Owner Console Instead
+              </button>
+            )}
           </div>
         </div>
         <OfflineIndicator />
@@ -760,10 +1004,23 @@ function POSWorkspace() {
 
   const isRetail = activeStore?.businessType === 'retail';
 
-  const navItems: { id: AppTab; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
+  const navItems: {
+    id: AppTab;
+    label: string;
+    icon: React.ComponentType<{ className?: string }>;
+    badge?: number;
+  }[] = [
     { id: 'billing', label: 'POS Billing', icon: ShoppingCart },
     ...(!isRetail && activeStore
-      ? [{ id: 'waiter' as const, label: 'Waiter Order & KOT', icon: Smartphone }]
+      ? [
+          { id: 'waiter' as const, label: 'Waiter Order & KOT', icon: Smartphone },
+          {
+            id: 'kot_queue' as const,
+            label: 'Kitchen KOT Queue',
+            icon: Printer,
+            badge: pendingKotTickets.length,
+          },
+        ]
       : []),
     { id: 'inventory', label: 'Inventory & Stock', icon: Package },
     ...(isRetail ? [{ id: 'barcodes' as const, label: 'Barcode Labels', icon: Barcode }] : []),
@@ -864,7 +1121,7 @@ function POSWorkspace() {
 
       {/* Primary Workspace Navigation */}
       <nav className="flex-1 p-3 space-y-1 overflow-y-auto" aria-label="POS sections">
-        {navItems.map(({ id, label, icon: Icon }) => {
+        {navItems.map(({ id, label, icon: Icon, badge }) => {
           const active = activeTab === id;
           return (
             <button
@@ -874,14 +1131,21 @@ function POSWorkspace() {
                 setActiveTab(id);
                 setMobileNavOpen(false);
               }}
-              className={`w-full flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors whitespace-nowrap cursor-pointer ${
+              className={`w-full flex items-center justify-between gap-2 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors whitespace-nowrap cursor-pointer ${
                 active
                   ? 'brand-soft-bg brand-text font-semibold'
                   : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800/70 hover:text-slate-900 dark:hover:text-slate-100'
               }`}
             >
-              <Icon className="w-4 h-4 shrink-0" />
-              <span className="truncate">{label}</span>
+              <span className="flex items-center gap-3 min-w-0">
+                <Icon className="w-4 h-4 shrink-0" />
+                <span className="truncate">{label}</span>
+              </span>
+              {typeof badge === 'number' && badge > 0 && (
+                <span className="rounded-md bg-amber-500 text-white text-[11px] font-bold font-mono px-1.5 py-0.5 leading-none shrink-0">
+                  {badge}
+                </span>
+              )}
             </button>
           );
         })}
@@ -990,10 +1254,27 @@ function POSWorkspace() {
           </div>
 
           <div className="flex items-center gap-2 shrink-0">
+            {!isRetail && activeStore && pendingKotTickets.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setActiveTab('kot_queue')}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/50 px-3 py-1.5 text-xs font-semibold text-amber-800 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-950/80 whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                <Bell className="w-3.5 h-3.5" />
+                <span>
+                  {pendingKotTickets.length} KOT Pending
+                </span>
+              </button>
+            )}
             {activeWaiterGrant && (
               <button
                 type="button"
-                onClick={() => setPreferWaiterMode(true)}
+                onClick={() => {
+                  if (typeof window !== 'undefined') {
+                    window.sessionStorage.setItem('bazaarflow_login_mode', 'waiter');
+                  }
+                  setPreferWaiterMode(true);
+                }}
                 className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-200 dark:border-emerald-900/60 bg-emerald-50 dark:bg-emerald-950/30 px-3 py-1.5 text-xs font-semibold text-emerald-700 dark:text-emerald-300 hover:bg-emerald-100 dark:hover:bg-emerald-950/50 whitespace-nowrap shrink-0 cursor-pointer"
               >
                 <Smartphone className="w-3.5 h-3.5" />
@@ -1034,6 +1315,46 @@ function POSWorkspace() {
             </div>
           ) : (
             <>
+              {!isRetail && pendingKotTickets.length > 0 && activeTab !== 'kot_queue' && (
+                <div className="mb-4 rounded-xl border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/40 px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div className="w-8 h-8 rounded-lg bg-amber-500 text-white flex items-center justify-center shrink-0">
+                      <Bell className="w-4 h-4" />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="text-xs font-bold text-amber-950 dark:text-amber-100">
+                        New Kitchen KOT Waiting ({pendingKotTickets.length})
+                      </div>
+                      <div className="text-xs text-amber-800 dark:text-amber-300 truncate">
+                        {pendingKotTickets[0].tableNumber
+                          ? `Table ${pendingKotTickets[0].tableNumber}`
+                          : 'Counter Order'}
+                        {pendingKotTickets[0].employeeName
+                          ? ` · Waiter: ${pendingKotTickets[0].employeeName}`
+                          : ''}
+                        {` · ${pendingKotTickets[0].itemCount} item${pendingKotTickets[0].itemCount === 1 ? '' : 's'}`}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => handlePrintKotTicket(pendingKotTickets[0], false)}
+                      className="inline-flex items-center gap-1.5 rounded-lg brand-bg px-3.5 py-2 text-xs font-semibold text-white cursor-pointer"
+                    >
+                      <Printer className="w-3.5 h-3.5" />
+                      <span>Print KOT Now</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab('kot_queue')}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-amber-300 dark:border-amber-700 bg-white dark:bg-slate-900 px-3 py-2 text-xs font-semibold text-amber-900 dark:text-amber-200 hover:bg-amber-100/60 dark:hover:bg-amber-950/60 cursor-pointer"
+                    >
+                      <span>Open Queue</span>
+                    </button>
+                  </div>
+                </div>
+              )}
               {activeTab === 'billing' && (
                 <BillingView
                   store={activeStore}
@@ -1054,6 +1375,20 @@ function POSWorkspace() {
                   tableSessions={tableSessions}
                   employees={employees}
                   onPrintJob={setPrintJob}
+                />
+              )}
+              {activeTab === 'kot_queue' && !isRetail && (
+                <KitchenKotQueueView
+                  store={activeStore}
+                  tickets={kotTickets}
+                  soundEnabled={kotSoundEnabled}
+                  onToggleSound={() => setKotSoundEnabled((v) => !v)}
+                  autoPrintEnabled={kotAutoPrint}
+                  onToggleAutoPrint={() => setKotAutoPrint((v) => !v)}
+                  onPrintTicket={handlePrintKotTicket}
+                  onMarkPrinted={handleMarkKotPrinted}
+                  onClearPrinted={handleClearPrintedKots}
+                  onTestBell={playKitchenBellChime}
                 />
               )}
               {activeTab === 'inventory' && (
@@ -1133,7 +1468,12 @@ function POSWorkspace() {
 
       {/* Unified Thermal Receipt, KOT, Barcode Sheet & Daily Z-Report Printer */}
       {activeStore && (
-        <PrintModal job={printJob} store={activeStore} onClose={() => setPrintJob(null)} />
+        <PrintModal
+          job={printJob}
+          store={activeStore}
+          onClose={() => setPrintJob(null)}
+          onMarkKotPrinted={(kotId) => void handleMarkKotPrinted(kotId)}
+        />
       )}
 
       <OfflineIndicator />

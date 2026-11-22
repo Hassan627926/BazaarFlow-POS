@@ -9,6 +9,7 @@ export type StockReason = 'restock' | 'sale' | 'void_restore' | 'damage' | 'adju
 export type AppTab =
   | 'billing'
   | 'waiter'
+  | 'kot_queue'
   | 'inventory'
   | 'barcodes'
   | 'sales'
@@ -179,7 +180,11 @@ export interface Employee {
   shift: string;
   notes: string;
   loginEmail?: string;
+  waiterUid?: string;
   mobileAccess?: boolean;
+  canEditOrders?: boolean;
+  canPrintKot?: boolean;
+  canViewPrices?: boolean;
   active: boolean;
   createdAt?: Timestamp | null;
   updatedAt?: Timestamp | null;
@@ -194,7 +199,34 @@ export interface WaiterAccess {
   employeeName: string;
   role: string;
   waiterEmail: string;
+  waiterUid?: string;
+  canEditOrders?: boolean;
+  canPrintKot?: boolean;
+  canViewPrices?: boolean;
   active: boolean;
+  createdAt?: Timestamp | null;
+  updatedAt?: Timestamp | null;
+}
+
+export type KotTicketKind = 'new' | 'addon' | 'revised' | 'reprint';
+export type KotTicketStatus = 'pending' | 'printed';
+
+export interface KotTicket {
+  id: string;
+  ownerId: string;
+  storeId: string;
+  ticketNumber: string;
+  tableNumber: string;
+  orderType: OrderType;
+  ticketKind: KotTicketKind;
+  items: SaleItem[];
+  itemCount: number;
+  changeNotes?: string[];
+  customerName: string;
+  employeeId?: string;
+  employeeName?: string;
+  source: 'waiter_mobile' | 'counter';
+  status: KotTicketStatus;
   createdAt?: Timestamp | null;
   updatedAt?: Timestamp | null;
 }
@@ -211,6 +243,14 @@ export interface BarcodeLabelPrintItem {
 
 export type PrintJob =
   | { type: 'receipt'; sale: Sale }
-  | { type: 'kot'; sale: Sale; isAddOn?: boolean; isRevised?: boolean; changeNotes?: string[] }
+  | {
+      type: 'kot';
+      sale: Sale;
+      isAddOn?: boolean;
+      isRevised?: boolean;
+      changeNotes?: string[];
+      kotId?: string;
+      autoPrint?: boolean;
+    }
   | { type: 'barcodes'; labels: BarcodeLabelPrintItem[] }
   | { type: 'daily_report'; dateKey: string; sales: Sale[]; products: Product[] };

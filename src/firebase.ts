@@ -1,5 +1,13 @@
-import { initializeApp } from 'firebase/app';
-import { getAuth, GoogleAuthProvider } from 'firebase/auth';
+import { deleteApp, initializeApp } from 'firebase/app';
+import {
+  createUserWithEmailAndPassword,
+  getAuth,
+  GoogleAuthProvider,
+  inMemoryPersistence,
+  setPersistence,
+  signOut,
+  updateProfile,
+} from 'firebase/auth';
 import { doc, getDocFromServer, getFirestore } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
 
@@ -9,6 +17,53 @@ export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({ prompt: 'select_account' });
+
+export type ProvisionWaiterResult =
+  | { status: 'created'; uid: string }
+  | { status: 'already_exists' };
+
+/**
+ * Provisions a Waiter Email/Password login account inside the Owner's session using an
+ * isolated secondary Firebase App with in-memory persistence so the Owner is never logged out.
+ */
+export async function provisionWaiterAuthAccount(
+  email: string,
+  password: string,
+  displayName: string
+): Promise<ProvisionWaiterResult> {
+  const secondaryAppName = `waiter-provision-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  const secondaryApp = initializeApp(firebaseConfig, secondaryAppName);
+  const secondaryAuth = getAuth(secondaryApp);
+  try {
+    await setPersistence(secondaryAuth, inMemoryPersistence);
+    const cred = await createUserWithEmailAndPassword(secondaryAuth, email, password);
+    if (displayName.trim()) {
+      try {
+        await updateProfile(cred.user, { displayName: displayName.trim() });
+      } catch {
+        // Display name update is non-blocking
+      }
+    }
+    const uid = cred.user.uid;
+    await signOut(secondaryAuth);
+    return { status: 'created', uid };
+  } catch (err: unknown) {
+    const code =
+      typeof err === 'object' && err !== null && 'code' in err
+        ? String((err as { code?: unknown }).code ?? '')
+        : '';
+    if (code === 'auth/email-already-in-use') {
+      return { status: 'already_exists' };
+    }
+    throw err;
+  } finally {
+    try {
+      await deleteApp(secondaryApp);
+    } catch {
+      // Ignore cleanup errors
+    }
+  }
+}
 
 export enum OperationType {
   CREATE = 'create',

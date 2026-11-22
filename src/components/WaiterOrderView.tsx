@@ -17,7 +17,7 @@ import {
   UserCheck,
   UtensilsCrossed,
 } from 'lucide-react';
-import { doc, serverTimestamp, writeBatch } from 'firebase/firestore';
+import { doc, serverTimestamp, setDoc, writeBatch } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '../firebase';
 import {
   BLUEPRINT_LIMITS,
@@ -94,6 +94,10 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
     Math.max(1, store.tableCount ?? BLUEPRINT_LIMITS.TABLE_COUNT_DEFAULT)
   );
 
+  const canEditOrders = waiterGrant ? waiterGrant.canEditOrders !== false : true;
+  const canPrintKot = waiterGrant ? waiterGrant.canPrintKot !== false : true;
+  const canViewPrices = waiterGrant ? waiterGrant.canViewPrices !== false : true;
+
   const activeEmployees = useMemo(() => employees.filter((e) => e.active), [employees]);
   const [ownerSelectedEmpId, setOwnerSelectedEmpId] = useState<string>('');
 
@@ -110,6 +114,9 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
   const [submitting, setSubmitting] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [noticeMsg, setNoticeMsg] = useState<string | null>(null);
+  const [lastQueuedKotJob, setLastQueuedKotJob] = useState<Extract<PrintJob, { type: 'kot' }> | null>(
+    null
+  );
 
   // Resolve active waiter identity (locked to waiterGrant when signed in as waiter)
   const effectiveWaiter = useMemo(() => {
@@ -253,9 +260,13 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
     [cart]
   );
 
-  const flashNotice = (msg: string) => {
+  const flashNotice = (msg: string, kotJob?: Extract<PrintJob, { type: 'kot' }> | null) => {
     setNoticeMsg(msg);
-    window.setTimeout(() => setNoticeMsg(null), 3500);
+    setLastQueuedKotJob(kotJob ?? null);
+    window.setTimeout(() => {
+      setNoticeMsg(null);
+      setLastQueuedKotJob(null);
+    }, 6500);
   };
 
   const openTable = (num: string) => {
@@ -348,7 +359,7 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
   };
 
   const startEditingExisting = (adjustProductId?: string, delta = 0, removeAll = false) => {
-    if (!activeTableSession) return;
+    if (!activeTableSession || !canEditOrders) return;
     setErrorMsg(null);
     let draft =
       cartSaleItems.length > 0
@@ -386,12 +397,15 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
     setEditingOrder(true);
   };
 
-  const handleReprintKot = (session: TableSession) => {
+  const handleReprintKot = async (session: TableSession) => {
+    if (!canPrintKot) return;
+    const kotId = generateSafeId('kot');
+    const ticketNumber = `KOT-T${session.tableNumber}-${String(Date.now()).slice(-4)}`;
     const kotSale: Sale = {
-      id: `kot_reprint_${Date.now()}`,
+      id: kotId,
       ownerId: store.ownerId,
       storeId: store.id,
-      invoiceNumber: `KOT-T${session.tableNumber}`,
+      invoiceNumber: ticketNumber,
       dateKey: getTodayDateKey(),
       items: session.items,
       itemCount: session.itemCount,
@@ -414,6 +428,40 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
       createdAt: session.updatedAt ?? session.createdAt ?? null,
       updatedAt: null,
     };
+
+    if (standalone) {
+      // Push live reprint command directly to Counter/Kitchen Laptop printer
+      try {
+        await setDoc(doc(db, 'stores', store.id, 'kotQueue', kotId), {
+          ownerId: store.ownerId,
+          storeId: store.id,
+          ticketNumber,
+          tableNumber: session.tableNumber,
+          orderType: 'dine_in',
+          ticketKind: 'reprint',
+          items: session.items,
+          itemCount: session.itemCount,
+          customerName: (session.customerName || '').slice(0, BLUEPRINT_LIMITS.CUSTOMER_NAME_MAX),
+          employeeId: (session.employeeId || effectiveWaiter.id || '').slice(0, 128),
+          employeeName: (session.employeeName || effectiveWaiter.name || '').slice(
+            0,
+            BLUEPRINT_LIMITS.EMPLOYEE_NAME_MAX
+          ),
+          source: 'waiter_mobile',
+          status: 'pending',
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+        flashNotice(`Reprint KOT sent to Counter & Kitchen Printer for Table ${session.tableNumber}!`, {
+          type: 'kot',
+          sale: kotSale,
+        });
+        return;
+      } catch {
+        // Fallback to local print preview if queue write fails
+      }
+    }
+
     onPrintJob({ type: 'kot', sale: kotSale });
   };
 
@@ -510,16 +558,39 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
         });
       });
 
+      const kotId = generateSafeId('kot');
+      const ticketNumber = `KOT-T${selectedTable}-${String(Date.now()).slice(-4)}`;
+      const kotItemCount = cartSaleItems.reduce((a, i) => a + i.quantity, 0);
+
+      // Push live KOT to /stores/{storeId}/kotQueue so the Counter/Kitchen laptop prints immediately
+      batch.set(doc(db, 'stores', store.id, 'kotQueue', kotId), {
+        ownerId: store.ownerId,
+        storeId: store.id,
+        ticketNumber,
+        tableNumber: selectedTable,
+        orderType: 'dine_in',
+        ticketKind: isAddOn ? 'addon' : 'new',
+        items: cartSaleItems,
+        itemCount: kotItemCount,
+        customerName: cleanGuest,
+        employeeId: empId,
+        employeeName: empName,
+        source: waiterGrant ? 'waiter_mobile' : 'counter',
+        status: 'pending',
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+
       await batch.commit();
 
       const kotPreview: Sale = {
-        id: `kot_${Date.now()}`,
+        id: kotId,
         ownerId: store.ownerId,
         storeId: store.id,
-        invoiceNumber: `KOT-T${selectedTable}`,
+        invoiceNumber: ticketNumber,
         dateKey: getTodayDateKey(),
         items: cartSaleItems,
-        itemCount: cartSaleItems.reduce((a, i) => a + i.quantity, 0),
+        itemCount: kotItemCount,
         subtotal: cartSaleItems.reduce((a, i) => a + i.lineTotal, 0),
         discount: 0,
         taxRate: 0,
@@ -541,13 +612,32 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
       };
 
       const bookedTableNum = selectedTable;
+      const kotJob: Extract<PrintJob, { type: 'kot' }> = {
+        type: 'kot',
+        sale: kotPreview,
+        isAddOn,
+        kotId,
+      };
       closeTable();
-      flashNotice(
-        isAddOn
-          ? `Add-on sent for Table ${bookedTableNum} — Add-On KOT ready!`
-          : `Order placed for Table ${bookedTableNum} — KOT ready!`
-      );
-      onPrintJob({ type: 'kot', sale: kotPreview, isAddOn });
+
+      if (standalone) {
+        // Waiter mobile: KOT is already live in Counter/Kitchen printer queue — don't block waiter's phone
+        flashNotice(
+          isAddOn
+            ? `Add-on for Table ${bookedTableNum} sent to Counter & Kitchen Printer!`
+            : `Order for Table ${bookedTableNum} sent to Counter & Kitchen Printer!`,
+          canPrintKot ? kotJob : null
+        );
+      } else {
+        flashNotice(
+          isAddOn
+            ? `Add-on sent for Table ${bookedTableNum}${canPrintKot ? ' — Add-On KOT ready!' : '.'}`
+            : `Order placed for Table ${bookedTableNum}${canPrintKot ? ' — KOT ready!' : '.'}`
+        );
+        if (canPrintKot) {
+          onPrintJob(kotJob);
+        }
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unable to send table order.';
       setErrorMsg(`Order failed: ${msg}`);
@@ -565,7 +655,7 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
    * Save edits made by Waiter before food is served + optional Revised KOT
    */
   const handleSaveEditedOrder = async (printRevised: boolean) => {
-    if (!activeTableSession || !editingOrder) return;
+    if (!activeTableSession || !editingOrder || !canEditOrders) return;
 
     for (const d of editDiff) {
       if (d.delta > 0) {
@@ -665,18 +755,43 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
         });
       }
 
+      const revKotId = !isCancelling && printRevised ? generateSafeId('kot') : '';
+      const revTicketNumber = `KOT-REV-T${tableNum}-${String(Date.now()).slice(-4)}`;
+      const sanitizedCount = sanitizedItems.reduce((a, i) => a + i.quantity, 0);
+
+      if (revKotId) {
+        batch.set(doc(db, 'stores', store.id, 'kotQueue', revKotId), {
+          ownerId: store.ownerId,
+          storeId: store.id,
+          ticketNumber: revTicketNumber,
+          tableNumber: tableNum,
+          orderType: 'dine_in',
+          ticketKind: 'revised',
+          items: sanitizedItems,
+          itemCount: sanitizedCount,
+          changeNotes: changeNotes.slice(0, 50),
+          customerName: cleanGuest,
+          employeeId: empId,
+          employeeName: empName,
+          source: waiterGrant ? 'waiter_mobile' : 'counter',
+          status: 'pending',
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      }
+
       await batch.commit();
 
       const revisedKot: Sale | null =
         printRevised && !isCancelling
           ? {
-              id: `kot_rev_${Date.now()}`,
+              id: revKotId || `kot_rev_${Date.now()}`,
               ownerId: store.ownerId,
               storeId: store.id,
-              invoiceNumber: `KOT-REV-T${tableNum}`,
+              invoiceNumber: revTicketNumber,
               dateKey: getTodayDateKey(),
               items: sanitizedItems,
-              itemCount: sanitizedItems.reduce((a, i) => a + i.quantity, 0),
+              itemCount: sanitizedCount,
               subtotal: sanitizedItems.reduce((a, i) => a + i.lineTotal, 0),
               discount: 0,
               taxRate: 0,
@@ -698,14 +813,33 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
             }
           : null;
 
+      const revisedJob: Extract<PrintJob, { type: 'kot' }> | null = revisedKot
+        ? {
+            type: 'kot',
+            sale: revisedKot,
+            isRevised: true,
+            changeNotes,
+            kotId: revKotId || undefined,
+          }
+        : null;
+
       closeTable();
-      flashNotice(
-        isCancelling
-          ? `Table ${tableNum} cancelled & marked Empty.`
-          : `Table ${tableNum} updated${revisedKot ? ' — Revised KOT ready!' : '.'}`
-      );
-      if (revisedKot) {
-        onPrintJob({ type: 'kot', sale: revisedKot, isRevised: true, changeNotes });
+      if (standalone) {
+        flashNotice(
+          isCancelling
+            ? `Table ${tableNum} cancelled & marked Empty.`
+            : `Table ${tableNum} updated${revisedKot ? ' — Revised KOT sent to Counter & Kitchen Printer!' : '.'}`,
+          canPrintKot ? revisedJob : null
+        );
+      } else {
+        flashNotice(
+          isCancelling
+            ? `Table ${tableNum} cancelled & marked Empty.`
+            : `Table ${tableNum} updated${revisedKot ? ' — Revised KOT ready!' : '.'}`
+        );
+        if (revisedJob) {
+          onPrintJob(revisedJob);
+        }
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unable to save order changes.';
@@ -763,9 +897,21 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
       )}
 
       {noticeMsg && (
-        <div className="rounded-xl border border-emerald-200 dark:border-emerald-900/60 bg-emerald-50 dark:bg-emerald-950/40 px-4 py-2.5 text-xs font-semibold text-emerald-800 dark:text-emerald-300 flex items-center gap-2">
-          <Check className="w-4 h-4 shrink-0" />
-          <span>{noticeMsg}</span>
+        <div className="rounded-xl border border-emerald-200 dark:border-emerald-900/60 bg-emerald-50 dark:bg-emerald-950/40 px-4 py-2.5 text-xs font-semibold text-emerald-800 dark:text-emerald-300 flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0">
+            <Check className="w-4 h-4 shrink-0" />
+            <span>{noticeMsg}</span>
+          </div>
+          {lastQueuedKotJob && (
+            <button
+              type="button"
+              onClick={() => onPrintJob(lastQueuedKotJob)}
+              className="inline-flex items-center gap-1 rounded-lg border border-emerald-300 dark:border-emerald-800 bg-white dark:bg-slate-900 px-2.5 py-1 text-[11px] font-semibold text-emerald-800 dark:text-emerald-300 shrink-0 cursor-pointer"
+            >
+              <Printer className="w-3 h-3" />
+              <span>Print on Phone</span>
+            </button>
+          )}
         </div>
       )}
 
@@ -866,12 +1012,12 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
                         {isOccupied ? 'Occupied' : 'Empty'}
                       </div>
                     </div>
-                    {session && (
+                    {session && canPrintKot && (
                       <button
                         type="button"
                         onClick={(e) => {
                           e.stopPropagation();
-                          handleReprintKot(session);
+                          void handleReprintKot(session);
                         }}
                         className="rounded-lg border border-amber-300 dark:border-amber-800 bg-white dark:bg-slate-900 p-1.5 text-amber-800 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-950 cursor-pointer"
                         title="Reprint KOT"
@@ -886,7 +1032,9 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
                     <div className="mt-3 pt-2 border-t border-amber-200/80 dark:border-amber-900/50 space-y-0.5">
                       <div className="flex items-center justify-between text-xs font-mono tabular-nums font-semibold text-slate-900 dark:text-slate-100">
                         <span>{session.itemCount} items</span>
-                        <span>{formatMoney(session.subtotal, store.currency)}</span>
+                        {canViewPrices && (
+                          <span>{formatMoney(session.subtotal, store.currency)}</span>
+                        )}
                       </div>
                       {session.employeeName && (
                         <div className="text-[11px] text-slate-600 dark:text-slate-400 truncate">
@@ -940,24 +1088,28 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
                 </div>
               </div>
 
-              {activeTableSession && !editingOrder && (
+              {activeTableSession && !editingOrder && (canEditOrders || canPrintKot) && (
                 <div className="flex items-center gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() => startEditingExisting()}
-                    className="inline-flex items-center gap-1 rounded-lg border border-amber-400 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/40 px-2.5 py-1.5 text-xs font-semibold text-amber-900 dark:text-amber-300 cursor-pointer"
-                  >
-                    <Edit3 className="w-3.5 h-3.5" />
-                    <span>Edit Order</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleReprintKot(activeTableSession)}
-                    className="inline-flex items-center gap-1 rounded-lg border border-slate-200 dark:border-slate-700 px-2.5 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
-                  >
-                    <Printer className="w-3.5 h-3.5" />
-                    <span>Reprint KOT</span>
-                  </button>
+                  {canEditOrders && (
+                    <button
+                      type="button"
+                      onClick={() => startEditingExisting()}
+                      className="inline-flex items-center gap-1 rounded-lg border border-amber-400 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/40 px-2.5 py-1.5 text-xs font-semibold text-amber-900 dark:text-amber-300 cursor-pointer"
+                    >
+                      <Edit3 className="w-3.5 h-3.5" />
+                      <span>Edit Order</span>
+                    </button>
+                  )}
+                  {canPrintKot && (
+                    <button
+                      type="button"
+                      onClick={() => void handleReprintKot(activeTableSession)}
+                      className="inline-flex items-center gap-1 rounded-lg border border-slate-200 dark:border-slate-700 px-2.5 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
+                    >
+                      <Printer className="w-3.5 h-3.5" />
+                      <span>Reprint KOT</span>
+                    </button>
+                  )}
                 </div>
               )}
             </div>
@@ -976,9 +1128,11 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
               <div className="rounded-lg border border-amber-200 dark:border-amber-900/60 bg-amber-50/50 dark:bg-amber-950/20 p-3 space-y-2">
                 <div className="flex items-center justify-between text-xs font-semibold text-amber-900 dark:text-amber-300">
                   <span>Already Ordered ({activeTableSession.itemCount} items)</span>
-                  <span className="font-mono tabular-nums">
-                    {formatMoney(activeTableSession.subtotal, store.currency)}
-                  </span>
+                  {canViewPrices && (
+                    <span className="font-mono tabular-nums">
+                      {formatMoney(activeTableSession.subtotal, store.currency)}
+                    </span>
+                  )}
                 </div>
                 <div className="divide-y divide-amber-200/60 dark:divide-amber-900/40">
                   {activeTableSession.items.map((item, idx) => (
@@ -991,43 +1145,53 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
                           {item.name}
                         </span>
                         <span className="text-[11px] font-mono text-slate-500 dark:text-slate-400">
-                          {formatMoney(item.unitPrice, store.currency)} × {item.quantity}
+                          {canViewPrices
+                            ? `${formatMoney(item.unitPrice, store.currency)} × ${item.quantity}`
+                            : `Qty: ${item.quantity}`}
                         </span>
                       </div>
-                      <div className="flex items-center gap-1 shrink-0">
-                        <button
-                          type="button"
-                          onClick={() => startEditingExisting(item.productId, -1)}
-                          className="w-7 h-7 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 flex items-center justify-center text-slate-700 dark:text-slate-200 cursor-pointer"
-                          aria-label={`Reduce ${item.name}`}
-                        >
-                          <Minus className="w-3 h-3" />
-                        </button>
-                        <span className="w-6 text-center font-mono font-bold text-slate-900 dark:text-slate-100">
-                          {item.quantity}
+                      {canEditOrders ? (
+                        <div className="flex items-center gap-1 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => startEditingExisting(item.productId, -1)}
+                            className="w-7 h-7 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 flex items-center justify-center text-slate-700 dark:text-slate-200 cursor-pointer"
+                            aria-label={`Reduce ${item.name}`}
+                          >
+                            <Minus className="w-3 h-3" />
+                          </button>
+                          <span className="w-6 text-center font-mono font-bold text-slate-900 dark:text-slate-100">
+                            {item.quantity}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => startEditingExisting(item.productId, 1)}
+                            className="w-7 h-7 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 flex items-center justify-center text-slate-700 dark:text-slate-200 cursor-pointer"
+                            aria-label={`Increase ${item.name}`}
+                          >
+                            <Plus className="w-3 h-3" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => startEditingExisting(item.productId, 0, true)}
+                            className="w-7 h-7 rounded-md flex items-center justify-center text-slate-400 hover:text-red-600 cursor-pointer"
+                            aria-label={`Remove ${item.name}`}
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      ) : (
+                        <span className="font-mono font-bold text-slate-700 dark:text-slate-300 shrink-0">
+                          ×{item.quantity}
                         </span>
-                        <button
-                          type="button"
-                          onClick={() => startEditingExisting(item.productId, 1)}
-                          className="w-7 h-7 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 flex items-center justify-center text-slate-700 dark:text-slate-200 cursor-pointer"
-                          aria-label={`Increase ${item.name}`}
-                        >
-                          <Plus className="w-3 h-3" />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => startEditingExisting(item.productId, 0, true)}
-                          className="w-7 h-7 rounded-md flex items-center justify-center text-slate-400 hover:text-red-600 cursor-pointer"
-                          aria-label={`Remove ${item.name}`}
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
+                      )}
                     </div>
                   ))}
                 </div>
                 <p className="text-[11px] text-amber-800/80 dark:text-amber-300/80">
-                  Tap dishes below to send an Add-On KOT, or use - / + above to edit this order.
+                  {canEditOrders
+                    ? 'Tap dishes below to send an Add-On order, or use - / + above to edit this order.'
+                    : 'Tap dishes below to send an Add-On order for this table.'}
                 </p>
               </div>
             )}
@@ -1189,9 +1353,11 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
                         {product.name}
                       </div>
                       <div className="mt-0.5 flex items-center gap-2">
-                        <span className="text-sm font-bold font-mono tabular-nums brand-text">
-                          {formatMoney(product.sellingPrice, store.currency)}
-                        </span>
+                        {canViewPrices && (
+                          <span className="text-sm font-bold font-mono tabular-nums brand-text">
+                            {formatMoney(product.sellingPrice, store.currency)}
+                          </span>
+                        )}
                         <span className="text-[11px] text-slate-400 font-mono">
                           {product.stock <= 0 ? 'Out of stock' : `${product.stock} left`}
                         </span>
@@ -1258,25 +1424,41 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
                     </button>
                   ) : (
                     <>
-                      <button
-                        type="button"
-                        disabled={submitting || !hasEditChanges}
-                        onClick={() => void handleSaveEditedOrder(true)}
-                        className="flex-1 inline-flex items-center justify-center gap-2 rounded-xl brand-bg px-4 py-3 text-sm font-semibold text-white disabled:opacity-50 cursor-pointer"
-                      >
-                        <Printer className="w-4 h-4" />
-                        <span>
-                          {submitting ? 'Saving...' : `Save Table ${selectedTable} & Revised KOT`}
-                        </span>
-                      </button>
-                      <button
-                        type="button"
-                        disabled={submitting || !hasEditChanges}
-                        onClick={() => void handleSaveEditedOrder(false)}
-                        className="rounded-xl border border-slate-300 dark:border-slate-700 px-3.5 py-3 text-xs font-semibold text-slate-700 dark:text-slate-200 disabled:opacity-50 cursor-pointer"
-                      >
-                        Save Only
-                      </button>
+                      {canPrintKot ? (
+                        <>
+                          <button
+                            type="button"
+                            disabled={submitting || !hasEditChanges}
+                            onClick={() => void handleSaveEditedOrder(true)}
+                            className="flex-1 inline-flex items-center justify-center gap-2 rounded-xl brand-bg px-4 py-3 text-sm font-semibold text-white disabled:opacity-50 cursor-pointer"
+                          >
+                            <Printer className="w-4 h-4" />
+                            <span>
+                              {submitting ? 'Saving...' : `Save Table ${selectedTable} & Revised KOT`}
+                            </span>
+                          </button>
+                          <button
+                            type="button"
+                            disabled={submitting || !hasEditChanges}
+                            onClick={() => void handleSaveEditedOrder(false)}
+                            className="rounded-xl border border-slate-300 dark:border-slate-700 px-3.5 py-3 text-xs font-semibold text-slate-700 dark:text-slate-200 disabled:opacity-50 cursor-pointer"
+                          >
+                            Save Only
+                          </button>
+                        </>
+                      ) : (
+                        <button
+                          type="button"
+                          disabled={submitting || !hasEditChanges}
+                          onClick={() => void handleSaveEditedOrder(false)}
+                          className="flex-1 inline-flex items-center justify-center gap-2 rounded-xl brand-bg px-4 py-3 text-sm font-semibold text-white disabled:opacity-50 cursor-pointer"
+                        >
+                          <Check className="w-4 h-4" />
+                          <span>
+                            {submitting ? 'Saving...' : `Save Table ${selectedTable} Changes`}
+                          </span>
+                        </button>
+                      )}
                     </>
                   )}
                 </div>
@@ -1289,9 +1471,11 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
                         Table {selectedTable} · {cartCount} {cartCount === 1 ? 'new item' : 'new items'}
                       </span>
                     </div>
-                    <div className="text-base font-bold font-mono tabular-nums text-slate-900 dark:text-slate-100">
-                      {formatMoney(cartTotal, store.currency)}
-                    </div>
+                    {canViewPrices && (
+                      <div className="text-base font-bold font-mono tabular-nums text-slate-900 dark:text-slate-100">
+                        {formatMoney(cartTotal, store.currency)}
+                      </div>
+                    )}
                   </div>
                   <button
                     type="button"
@@ -1299,13 +1483,25 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
                     onClick={() => void handlePlaceOrderAndKot()}
                     className="inline-flex items-center justify-center gap-2 rounded-xl brand-bg px-5 py-3 text-sm font-semibold text-white disabled:opacity-45 transition-opacity shrink-0 cursor-pointer"
                   >
-                    <Printer className="w-4 h-4 shrink-0" />
+                    {canPrintKot ? (
+                      <Printer className="w-4 h-4 shrink-0" />
+                    ) : (
+                      <Check className="w-4 h-4 shrink-0" />
+                    )}
                     <span>
                       {submitting
                         ? 'Sending...'
                         : activeTableSession
-                        ? 'Add Extras & Print KOT'
-                        : 'Place Order & Print KOT'}
+                        ? standalone
+                          ? 'Send Add-On to Kitchen'
+                          : canPrintKot
+                          ? 'Add Extras & Print KOT'
+                          : 'Send Add-On Order'
+                        : standalone
+                        ? 'Send Order to Kitchen'
+                        : canPrintKot
+                        ? 'Place Order & Print KOT'
+                        : 'Send Order to Kitchen'}
                     </span>
                   </button>
                 </div>

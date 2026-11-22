@@ -4,13 +4,19 @@ import {
   Check,
   Copy,
   Edit3,
+  Eye,
+  EyeOff,
+  KeyRound,
+  Lock,
   MessageCircle,
   Phone,
   Plus,
   Search,
+  ShieldCheck,
   Smartphone,
   Trash2,
   UserCheck,
+  UserPlus,
   UserX,
   Users,
   X,
@@ -24,7 +30,12 @@ import {
   where,
   writeBatch,
 } from 'firebase/firestore';
-import { db, handleFirestoreError, OperationType } from '../firebase';
+import {
+  db,
+  handleFirestoreError,
+  OperationType,
+  provisionWaiterAuthAccount,
+} from '../firebase';
 import {
   BLUEPRINT_LIMITS,
   type Employee,
@@ -79,11 +90,25 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
   const [shift, setShift] = useState('Full Day');
   const [notes, setNotes] = useState('');
   const [loginEmail, setLoginEmail] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
+  const [showLoginPassword, setShowLoginPassword] = useState(false);
   const [mobileAccess, setMobileAccess] = useState(false);
+  const [canEditOrders, setCanEditOrders] = useState(true);
+  const [canPrintKot, setCanPrintKot] = useState(true);
+  const [canViewPrices, setCanViewPrices] = useState(true);
   const [active, setActive] = useState(true);
 
   const [accessMap, setAccessMap] = useState<Map<string, WaiterAccess>>(new Map());
+  const [memberUidSet, setMemberUidSet] = useState<Set<string>>(new Set());
   const [copiedLink, setCopiedLink] = useState(false);
+  const [createdCredentials, setCreatedCredentials] = useState<{
+    name: string;
+    email: string;
+    password: string;
+    phone: string;
+    alreadyExisted: boolean;
+  } | null>(null);
+  const [copiedCreds, setCopiedCreds] = useState(false);
 
   const [saving, setSaving] = useState(false);
   const [togglingId, setTogglingId] = useState<string | null>(null);
@@ -96,14 +121,15 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
     return `${window.location.origin}/?mode=waiter`;
   }, []);
 
-  // Track owner's /waiterAccess grants so we know cleanly whether to set or update
+  // Track owner's /waiterAccess grants and /stores/{storeId}/waiterMembers so batches stay atomic
   useEffect(() => {
     if (isRetail || !ownerId) {
       setAccessMap(new Map());
+      setMemberUidSet(new Set());
       return;
     }
     const q = query(collection(db, 'waiterAccess'), where('ownerId', '==', ownerId));
-    const unsub = onSnapshot(
+    const unsubAccess = onSnapshot(
       q,
       (snap) => {
         const next = new Map<string, WaiterAccess>();
@@ -119,7 +145,27 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
         // Non-blocking fallback
       }
     );
-    return () => unsub();
+
+    const membersQuery = query(
+      collection(db, 'stores', store.id, 'waiterMembers'),
+      where('ownerId', '==', ownerId)
+    );
+    const unsubMembers = onSnapshot(
+      membersQuery,
+      (snap) => {
+        const uids = new Set<string>();
+        snap.docs.forEach((d) => uids.add(d.id));
+        setMemberUidSet(uids);
+      },
+      () => {
+        // Non-blocking fallback
+      }
+    );
+
+    return () => {
+      unsubAccess();
+      unsubMembers();
+    };
   }, [isRetail, ownerId, store.id]);
 
   const handleCopyWaiterLink = async () => {
@@ -132,19 +178,42 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
     }
   };
 
-  const buildWhatsAppInviteHref = (emp: Employee) => {
+  const buildWhatsAppInviteHref = (
+    emp: { name: string; phone: string; loginEmail?: string },
+    password?: string
+  ) => {
     const waPhone = formatWhatsAppPhone(emp.phone);
     const lines = [
       `Assalam-o-Alaikum ${emp.name}!`,
-      `${store.name} ka Waiter Mobile App access active kar diya gaya hai.`,
+      `${store.name} ka Waiter Mobile App account active kar diya gaya hai.`,
       '',
       `1. App Link: ${waiterAppUrl}`,
-      `2. Google Sign-In Email: ${emp.loginEmail || ''}`,
+      `2. Login Email: ${emp.loginEmail || ''}`,
+      ...(password ? [`3. Password: ${password}`] : []),
       '',
-      'Mobile par open karein, apne Gmail se sign in karein, aur table orders & KOT print karein.',
+      password
+        ? 'Link open karein, "Waiter Mobile" tab mein upar di gayi Email aur Password se sign in karein, aur direct table orders lein.'
+        : 'Link open karein, "Waiter Mobile" tab mein is email se sign in karein, aur table orders & KOT print karein.',
     ];
     const encoded = encodeURIComponent(lines.join('\n'));
     return waPhone ? `https://wa.me/${waPhone}?text=${encoded}` : `https://wa.me/?text=${encoded}`;
+  };
+
+  const handleCopyCredentials = async () => {
+    if (!createdCredentials) return;
+    const text = [
+      `${store.name} — Waiter Mobile Login`,
+      `Link: ${waiterAppUrl}`,
+      `Email: ${createdCredentials.email}`,
+      ...(createdCredentials.password ? [`Password: ${createdCredentials.password}`] : []),
+    ].join('\n');
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedCreds(true);
+      window.setTimeout(() => setCopiedCreds(false), 2200);
+    } catch {
+      // Ignore clipboard failures
+    }
   };
 
   const existingRoles = useMemo(() => {
@@ -225,7 +294,7 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
     });
   }, [employees, search, statusFilter]);
 
-  const openAddModal = () => {
+  const openAddModal = (presetMobileAccess = false) => {
     setEditingEmployee(null);
     setName('');
     setRoleChoice(presetRoles[0]);
@@ -235,7 +304,12 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
     setShift('Full Day');
     setNotes('');
     setLoginEmail('');
-    setMobileAccess(false);
+    setLoginPassword('');
+    setShowLoginPassword(false);
+    setMobileAccess(presetMobileAccess && !isRetail);
+    setCanEditOrders(true);
+    setCanPrintKot(true);
+    setCanViewPrices(true);
     setActive(true);
     setFormError(null);
     setModalOpen(true);
@@ -256,7 +330,12 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
     setShift(emp.shift || 'Full Day');
     setNotes(emp.notes);
     setLoginEmail(emp.loginEmail ?? '');
+    setLoginPassword('');
+    setShowLoginPassword(false);
     setMobileAccess(Boolean(emp.mobileAccess));
+    setCanEditOrders(emp.canEditOrders !== false);
+    setCanPrintKot(emp.canPrintKot !== false);
+    setCanViewPrices(emp.canViewPrices !== false);
     setActive(emp.active);
     setFormError(null);
     setModalOpen(true);
@@ -272,6 +351,7 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
       .trim()
       .toLowerCase()
       .slice(0, BLUEPRINT_LIMITS.EMPLOYEE_EMAIL_MAX);
+    const cleanPassword = loginPassword;
     const enableMobile = !isRetail && mobileAccess;
 
     if (!cleanName) {
@@ -283,30 +363,84 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
       return;
     }
     if (enableMobile && (cleanEmail.length < 3 || !cleanEmail.includes('@'))) {
-      setFormError('Please enter a valid Google Email (Gmail) to enable Waiter Mobile Access.');
+      setFormError('Please enter a valid login email address for Waiter Mobile Access.');
+      return;
+    }
+    if (enableMobile && cleanPassword && cleanPassword.length < 6) {
+      setFormError('Waiter login password must be at least 6 characters.');
       return;
     }
 
     setSaving(true);
     setFormError(null);
 
-    const payload = {
-      name: cleanName,
-      role: resolvedRole,
-      phone: phone.trim().slice(0, BLUEPRINT_LIMITS.PHONE_MAX),
-      cnic: cnic.trim().slice(0, BLUEPRINT_LIMITS.EMPLOYEE_CNIC_MAX),
-      shift: shift.trim().slice(0, BLUEPRINT_LIMITS.EMPLOYEE_SHIFT_MAX),
-      notes: notes.trim().slice(0, BLUEPRINT_LIMITS.EMPLOYEE_NOTES_MAX),
-      loginEmail: cleanEmail,
-      mobileAccess: enableMobile,
-      active,
-    };
-
     const empId = editingEmployee ? editingEmployee.id : generateSafeId('emp');
     const accessId = `${store.id}_${empId}`;
     const empPath = `stores/${store.id}/employees/${empId}`;
+    const existingGrant = accessMap.get(accessId);
+
+    // Preserve any existing UID if the email hasn't changed
+    let resolvedWaiterUid =
+      editingEmployee?.loginEmail?.trim().toLowerCase() === cleanEmail
+        ? editingEmployee.waiterUid || existingGrant?.waiterUid || ''
+        : '';
+    let accountCreatedNow = false;
+    let accountAlreadyExisted = false;
 
     try {
+      // If Owner supplied a password, provision the waiter's login account directly without logging out the Owner
+      if (enableMobile && cleanEmail && cleanPassword) {
+        try {
+          const provisionRes = await provisionWaiterAuthAccount(
+            cleanEmail,
+            cleanPassword,
+            cleanName
+          );
+          if (provisionRes.status === 'created') {
+            resolvedWaiterUid = provisionRes.uid;
+            accountCreatedNow = true;
+          } else {
+            accountAlreadyExisted = true;
+          }
+        } catch (authErr: unknown) {
+          const code =
+            typeof authErr === 'object' && authErr !== null && 'code' in authErr
+              ? String((authErr as { code?: unknown }).code ?? '')
+              : '';
+          if (code === 'auth/operation-not-allowed') {
+            setFormError(
+              'Email/Password sign-in is disabled in Firebase Console. Enable Email/Password under Authentication → Sign-in method, then try again.'
+            );
+          } else if (code === 'auth/weak-password') {
+            setFormError('Password is too weak. Please use at least 6 characters.');
+          } else if (code === 'auth/invalid-email') {
+            setFormError('Invalid waiter email address format.');
+          } else {
+            setFormError(
+              authErr instanceof Error ? authErr.message : 'Unable to create waiter login account.'
+            );
+          }
+          setSaving(false);
+          return;
+        }
+      }
+
+      const payload = {
+        name: cleanName,
+        role: resolvedRole,
+        phone: phone.trim().slice(0, BLUEPRINT_LIMITS.PHONE_MAX),
+        cnic: cnic.trim().slice(0, BLUEPRINT_LIMITS.EMPLOYEE_CNIC_MAX),
+        shift: shift.trim().slice(0, BLUEPRINT_LIMITS.EMPLOYEE_SHIFT_MAX),
+        notes: notes.trim().slice(0, BLUEPRINT_LIMITS.EMPLOYEE_NOTES_MAX),
+        loginEmail: cleanEmail,
+        waiterUid: resolvedWaiterUid,
+        mobileAccess: enableMobile,
+        canEditOrders: enableMobile ? canEditOrders : true,
+        canPrintKot: enableMobile ? canPrintKot : true,
+        canViewPrices: enableMobile ? canViewPrices : true,
+        active,
+      };
+
       const batch = writeBatch(db);
       const empRef = doc(db, 'stores', store.id, 'employees', empId);
 
@@ -327,7 +461,8 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
 
       if (!isRetail) {
         const accessRef = doc(db, 'waiterAccess', accessId);
-        const existingGrant = accessMap.get(accessId);
+        const grantActive = active && enableMobile;
+
         if (enableMobile && cleanEmail) {
           if (existingGrant) {
             batch.update(accessRef, {
@@ -335,7 +470,11 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
               employeeName: cleanName,
               role: resolvedRole,
               waiterEmail: cleanEmail,
-              active: active && enableMobile,
+              waiterUid: resolvedWaiterUid,
+              canEditOrders,
+              canPrintKot,
+              canViewPrices,
+              active: grantActive,
               updatedAt: serverTimestamp(),
             });
           } else {
@@ -347,21 +486,71 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
               employeeName: cleanName,
               role: resolvedRole,
               waiterEmail: cleanEmail,
-              active: active && enableMobile,
+              waiterUid: resolvedWaiterUid,
+              canEditOrders,
+              canPrintKot,
+              canViewPrices,
+              active: grantActive,
               createdAt: serverTimestamp(),
               updatedAt: serverTimestamp(),
             });
+          }
+
+          // Bind /stores/{storeId}/waiterMembers/{waiterUid} directly as Owner so the waiter
+          // gets immediate access on their very first Email/Password sign-in!
+          if (resolvedWaiterUid) {
+            const memberRef = doc(db, 'stores', store.id, 'waiterMembers', resolvedWaiterUid);
+            if (memberUidSet.has(resolvedWaiterUid)) {
+              batch.update(memberRef, {
+                accessId,
+                employeeId: empId,
+                employeeName: cleanName,
+                waiterEmail: cleanEmail,
+                active: grantActive,
+                updatedAt: serverTimestamp(),
+              });
+            } else {
+              batch.set(memberRef, {
+                ownerId,
+                storeId: store.id,
+                accessId,
+                employeeId: empId,
+                employeeName: cleanName,
+                waiterUid: resolvedWaiterUid,
+                waiterEmail: cleanEmail,
+                active: grantActive,
+                createdAt: serverTimestamp(),
+                updatedAt: serverTimestamp(),
+              });
+            }
           }
         } else if (existingGrant) {
           batch.update(accessRef, {
             active: false,
             updatedAt: serverTimestamp(),
           });
+          const prevUid = existingGrant.waiterUid || editingEmployee?.waiterUid || '';
+          if (prevUid && memberUidSet.has(prevUid)) {
+            batch.update(doc(db, 'stores', store.id, 'waiterMembers', prevUid), {
+              active: false,
+              updatedAt: serverTimestamp(),
+            });
+          }
         }
       }
 
       await batch.commit();
       setModalOpen(false);
+
+      if (enableMobile && (accountCreatedNow || accountAlreadyExisted)) {
+        setCreatedCredentials({
+          name: cleanName,
+          email: cleanEmail,
+          password: accountCreatedNow ? cleanPassword : '',
+          phone: phone.trim(),
+          alreadyExisted: accountAlreadyExisted,
+        });
+      }
     } catch (err) {
       setFormError(err instanceof Error ? err.message : 'Unable to save employee.');
       handleFirestoreError(
@@ -378,6 +567,8 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
     setTogglingId(emp.id);
     const nextActive = !emp.active;
     const accessId = `${store.id}_${emp.id}`;
+    const existingGrant = accessMap.get(accessId);
+    const waiterUid = emp.waiterUid || existingGrant?.waiterUid || '';
     const path = `stores/${store.id}/employees/${emp.id}`;
     try {
       const batch = writeBatch(db);
@@ -385,11 +576,18 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
         active: nextActive,
         updatedAt: serverTimestamp(),
       });
-      if (!isRetail && accessMap.has(accessId)) {
+      if (!isRetail && existingGrant) {
+        const grantActive = nextActive && Boolean(emp.mobileAccess);
         batch.update(doc(db, 'waiterAccess', accessId), {
-          active: nextActive && Boolean(emp.mobileAccess),
+          active: grantActive,
           updatedAt: serverTimestamp(),
         });
+        if (waiterUid && memberUidSet.has(waiterUid)) {
+          batch.update(doc(db, 'stores', store.id, 'waiterMembers', waiterUid), {
+            active: grantActive,
+            updatedAt: serverTimestamp(),
+          });
+        }
       }
       await batch.commit();
     } catch (err) {
@@ -402,12 +600,17 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
   const handleDeleteEmployee = async (emp: Employee) => {
     setDeletingId(emp.id);
     const accessId = `${store.id}_${emp.id}`;
+    const existingGrant = accessMap.get(accessId);
+    const waiterUid = emp.waiterUid || existingGrant?.waiterUid || '';
     const path = `stores/${store.id}/employees/${emp.id}`;
     try {
       const batch = writeBatch(db);
       batch.delete(doc(db, 'stores', store.id, 'employees', emp.id));
-      if (!isRetail && accessMap.has(accessId)) {
+      if (!isRetail && existingGrant) {
         batch.delete(doc(db, 'waiterAccess', accessId));
+      }
+      if (!isRetail && waiterUid && memberUidSet.has(waiterUid)) {
+        batch.delete(doc(db, 'stores', store.id, 'waiterMembers', waiterUid));
       }
       await batch.commit();
       setConfirmDeleteId(null);
@@ -454,7 +657,7 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
         </div>
       </div>
 
-      {/* Waiter Mobile App Access Link Bar (Restaurant Mode Only) */}
+      {/* Waiter Mobile App Access Bar (Restaurant Mode Only) */}
       {!isRetail && (
         <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 flex flex-col md:flex-row md:items-center justify-between gap-3">
           <div className="flex items-start gap-3 min-w-0">
@@ -464,22 +667,27 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2">
                 <h3 className="text-sm font-bold font-display text-slate-900 dark:text-slate-100">
-                  Waiter Mobile App Access
+                  Waiter Mobile App Accounts
                 </h3>
                 <span className="text-[11px] font-mono text-emerald-700 dark:text-emerald-400 font-semibold">
                   {summary.mobileEnabledCount} active waiter{summary.mobileEnabledCount === 1 ? '' : 's'}
                 </span>
               </div>
               <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5 leading-relaxed">
-                Add a waiter&apos;s Google Email below and enable Mobile Access. Waiters open this link on their mobile phone to place direct table orders and print KOTs — without access to your sales, profits, or store settings.
+                Create each waiter&apos;s login Email &amp; Password right here inside your restaurant. Waiters only see <strong>{store.name}</strong>&apos;s tables &amp; menu with the permissions you allow — never your sales, profits, or settings.
               </p>
             </div>
           </div>
 
-          <div className="flex items-center gap-2 shrink-0">
-            <code className="hidden sm:block max-w-[230px] truncate rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-2.5 py-2 text-[11px] font-mono text-slate-600 dark:text-slate-300">
-              {waiterAppUrl}
-            </code>
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => openAddModal(true)}
+              className="inline-flex items-center gap-1.5 rounded-lg brand-bg px-3 py-2 text-xs font-semibold text-white whitespace-nowrap cursor-pointer"
+            >
+              <UserPlus className="w-3.5 h-3.5" />
+              <span>Create Waiter Account</span>
+            </button>
             <button
               type="button"
               onClick={() => void handleCopyWaiterLink()}
@@ -497,6 +705,83 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
                 </>
               )}
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* Newly Provisioned Waiter Login Credentials Banner */}
+      {createdCredentials && (
+        <div className="rounded-xl border border-emerald-200 dark:border-emerald-900/70 bg-emerald-50 dark:bg-emerald-950/35 p-4 space-y-3">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex items-start gap-2.5">
+              <KeyRound className="w-4 h-4 text-emerald-700 dark:text-emerald-400 mt-0.5 shrink-0" />
+              <div className="space-y-1">
+                <div className="text-sm font-bold text-emerald-950 dark:text-emerald-200">
+                  {createdCredentials.alreadyExisted
+                    ? `Waiter Access Linked for ${createdCredentials.name}`
+                    : `Waiter Account Created for ${createdCredentials.name}`}
+                </div>
+                <p className="text-xs text-emerald-900/80 dark:text-emerald-300/90 leading-relaxed">
+                  {createdCredentials.alreadyExisted
+                    ? `This email already had an existing account and is now linked directly to ${store.name}. Ask the waiter to open the Waiter Mobile link and sign in with their existing password or Google account.`
+                    : `Share these login details with ${createdCredentials.name}. When they sign in on Waiter Mobile, ${store.name}'s live tables and menu will open directly.`}
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setCreatedCredentials(null)}
+              className="rounded-lg p-1 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-100 dark:hover:bg-emerald-900/50 cursor-pointer"
+              aria-label="Dismiss credentials banner"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 rounded-lg bg-white/85 dark:bg-slate-900/80 border border-emerald-200/80 dark:border-emerald-900/60 p-3 text-xs font-mono">
+            <div className="min-w-0">
+              <div className="text-[10px] font-sans text-slate-500">Waiter App Link</div>
+              <div className="truncate text-slate-900 dark:text-slate-100">{waiterAppUrl}</div>
+            </div>
+            <div className="min-w-0">
+              <div className="text-[10px] font-sans text-slate-500">Login Email</div>
+              <div className="truncate text-slate-900 dark:text-slate-100">
+                {createdCredentials.email}
+              </div>
+            </div>
+            <div className="min-w-0">
+              <div className="text-[10px] font-sans text-slate-500">Password</div>
+              <div className="truncate text-slate-900 dark:text-slate-100">
+                {createdCredentials.password || '(Existing account password)'}
+              </div>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => void handleCopyCredentials()}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-300 dark:border-emerald-800 bg-white dark:bg-slate-900 px-3 py-1.5 text-xs font-semibold text-emerald-800 dark:text-emerald-300 cursor-pointer"
+            >
+              {copiedCreds ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+              <span>{copiedCreds ? 'Copied Details' : 'Copy Login Details'}</span>
+            </button>
+            <a
+              href={buildWhatsAppInviteHref(
+                {
+                  name: createdCredentials.name,
+                  phone: createdCredentials.phone,
+                  loginEmail: createdCredentials.email,
+                },
+                createdCredentials.password
+              )}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 px-3 py-1.5 text-xs font-semibold text-white"
+            >
+              <MessageCircle className="w-3.5 h-3.5" />
+              <span>Send on WhatsApp</span>
+            </a>
           </div>
         </div>
       )}
@@ -542,7 +827,7 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
 
           <button
             type="button"
-            onClick={openAddModal}
+            onClick={() => openAddModal(false)}
             className="inline-flex items-center gap-1.5 rounded-lg brand-bg px-3.5 py-2 text-xs font-semibold text-white whitespace-nowrap cursor-pointer"
           >
             <Plus className="w-3.5 h-3.5" />
@@ -561,11 +846,11 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
             </p>
             <button
               type="button"
-              onClick={openAddModal}
+              onClick={() => openAddModal(!isRetail)}
               className="inline-flex items-center gap-1.5 rounded-lg brand-bg px-4 py-2.5 text-sm font-semibold text-white cursor-pointer"
             >
               <Plus className="w-4 h-4" />
-              <span>Add First Employee</span>
+              <span>{isRetail ? 'Add First Employee' : 'Create First Waiter Account'}</span>
             </button>
           </div>
         ) : (
@@ -673,8 +958,18 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
                                   <Smartphone className="w-3 h-3" />
                                   <span>{emp.active ? 'Mobile App ON' : 'Mobile Paused'}</span>
                                 </span>
-                                <span className="text-[10px] font-mono text-slate-400 truncate max-w-[160px]">
+                                <span className="text-[10px] font-mono text-slate-400 truncate max-w-[175px]">
                                   {emp.loginEmail}
+                                </span>
+                                <span className="text-[10px] text-slate-500 dark:text-slate-400">
+                                  {[
+                                    'Orders',
+                                    emp.canEditOrders !== false ? 'Edit' : null,
+                                    emp.canPrintKot !== false ? 'KOT' : null,
+                                    emp.canViewPrices !== false ? 'Prices' : null,
+                                  ]
+                                    .filter(Boolean)
+                                    .join(' · ')}
                                 </span>
                               </div>
                             )}
@@ -899,7 +1194,7 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
               </div>
 
               {!isRetail && (
-                <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950/60 p-3.5 space-y-2.5">
+                <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950/60 p-3.5 space-y-3">
                   <label className="flex items-start gap-2.5 text-xs font-semibold text-slate-800 dark:text-slate-200 cursor-pointer">
                     <input
                       type="checkbox"
@@ -908,30 +1203,109 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
                       className="rounded border-slate-300 mt-0.5"
                     />
                     <span>
-                      Enable Waiter Mobile App Access
+                      Enable Waiter Mobile App Account
                       <span className="block text-[11px] font-normal text-slate-500 dark:text-slate-400 mt-0.5">
-                        Allows this staff member to place table orders & print KOTs from their phone.
+                        Creates/links a waiter login under <strong>{store.name}</strong> — no separate brand is created.
                       </span>
                     </span>
                   </label>
 
                   {mobileAccess && (
-                    <div>
-                      <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
-                        Waiter Google Email (Gmail) *
-                      </label>
-                      <input
-                        type="email"
-                        required={mobileAccess}
-                        maxLength={BLUEPRINT_LIMITS.EMPLOYEE_EMAIL_MAX}
-                        value={loginEmail}
-                        onChange={(e) => setLoginEmail(e.target.value)}
-                        placeholder="waiter.name@gmail.com"
-                        className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm font-mono text-slate-900 dark:text-slate-100"
-                      />
-                      <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
-                        Waiter signs in with this exact Google account on their mobile.
-                      </p>
+                    <div className="space-y-3 pt-1 border-t border-slate-200 dark:border-slate-800">
+                      <div>
+                        <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
+                          Waiter Login Email *
+                        </label>
+                        <input
+                          type="email"
+                          required={mobileAccess}
+                          maxLength={BLUEPRINT_LIMITS.EMPLOYEE_EMAIL_MAX}
+                          value={loginEmail}
+                          onChange={(e) => setLoginEmail(e.target.value)}
+                          placeholder="ali.waiter@gmail.com"
+                          className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm font-mono text-slate-900 dark:text-slate-100"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
+                          {editingEmployee?.waiterUid
+                            ? 'Waiter Login Password (Leave blank to keep existing)'
+                            : 'Create Waiter Password (6+ characters)'}
+                        </label>
+                        <div className="relative">
+                          <Lock className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                          <input
+                            type={showLoginPassword ? 'text' : 'password'}
+                            minLength={6}
+                            value={loginPassword}
+                            onChange={(e) => setLoginPassword(e.target.value)}
+                            placeholder={
+                              editingEmployee?.waiterUid
+                                ? 'Already created — leave blank'
+                                : 'Set password e.g. waiter123'
+                            }
+                            className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 pl-8 pr-9 py-2 text-sm text-slate-900 dark:text-slate-100"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setShowLoginPassword((v) => !v)}
+                            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 cursor-pointer"
+                            aria-label={showLoginPassword ? 'Hide password' : 'Show password'}
+                          >
+                            {showLoginPassword ? (
+                              <EyeOff className="w-4 h-4" />
+                            ) : (
+                              <Eye className="w-4 h-4" />
+                            )}
+                          </button>
+                        </div>
+                        <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
+                          Creates the waiter&apos;s login directly inside your Owner console without logging you out. Leave blank only if linking an existing Google account.
+                        </p>
+                      </div>
+
+                      {/* Owner-Controlled Waiter Data Access Permissions */}
+                      <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-3 space-y-2">
+                        <div className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-700 dark:text-slate-300">
+                          <ShieldCheck className="w-3.5 h-3.5 brand-text" />
+                          <span>Restaurant Access Allowed for This Waiter</span>
+                        </div>
+                        <label className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+                          <input type="checkbox" checked disabled className="rounded border-slate-300" />
+                          <span>View Live Tables, Menu &amp; Place New / Add-On Orders</span>
+                        </label>
+                        <label className="flex items-center gap-2 text-xs text-slate-700 dark:text-slate-300 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={canEditOrders}
+                            onChange={(e) => setCanEditOrders(e.target.checked)}
+                            className="rounded border-slate-300"
+                          />
+                          <span>Edit or Cancel Items on Occupied Tables</span>
+                        </label>
+                        <label className="flex items-center gap-2 text-xs text-slate-700 dark:text-slate-300 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={canPrintKot}
+                            onChange={(e) => setCanPrintKot(e.target.checked)}
+                            className="rounded border-slate-300"
+                          />
+                          <span>Print &amp; Reprint Kitchen Order Tickets (KOT)</span>
+                        </label>
+                        <label className="flex items-center gap-2 text-xs text-slate-700 dark:text-slate-300 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={canViewPrices}
+                            onChange={(e) => setCanViewPrices(e.target.checked)}
+                            className="rounded border-slate-300"
+                          />
+                          <span>View Menu Item Prices &amp; Table Subtotals</span>
+                        </label>
+                        <p className="text-[10px] text-slate-400 pt-0.5">
+                          Sales reports, profit, cost prices, inventory edits, and store settings are always blocked for waiters.
+                        </p>
+                      </div>
                     </div>
                   )}
                 </div>

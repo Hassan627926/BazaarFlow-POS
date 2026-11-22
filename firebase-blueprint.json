@@ -281,7 +281,11 @@
         "shift": { "type": "string", "maxLength": 40 },
         "notes": { "type": "string", "maxLength": 160 },
         "loginEmail": { "type": "string", "maxLength": 120 },
+        "waiterUid": { "type": "string", "maxLength": 128 },
         "mobileAccess": { "type": "boolean" },
+        "canEditOrders": { "type": "boolean" },
+        "canPrintKot": { "type": "boolean" },
+        "canViewPrices": { "type": "boolean" },
         "active": { "type": "boolean" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
@@ -302,7 +306,7 @@
     },
     "WaiterAccess": {
       "title": "WaiterAccess",
-      "description": "Owner-issued mobile waiter access grant mapping a staff member's Google email to a restaurant store for direct table ordering and KOT printing.",
+      "description": "Owner-issued mobile waiter access grant mapping a staff member's login email and permissions to a restaurant store for direct table ordering and KOT printing.",
       "type": "object",
       "properties": {
         "ownerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
@@ -312,6 +316,10 @@
         "employeeName": { "type": "string", "minLength": 1, "maxLength": 80 },
         "role": { "type": "string", "minLength": 1, "maxLength": 40 },
         "waiterEmail": { "type": "string", "minLength": 3, "maxLength": 120 },
+        "waiterUid": { "type": "string", "maxLength": 128 },
+        "canEditOrders": { "type": "boolean" },
+        "canPrintKot": { "type": "boolean" },
+        "canViewPrices": { "type": "boolean" },
         "active": { "type": "boolean" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
@@ -357,6 +365,44 @@
         "createdAt",
         "updatedAt"
       ]
+    },
+    "KotTicket": {
+      "title": "KotTicket",
+      "description": "Real-time Kitchen Order Ticket queued from Waiter Mobile or Counter POS for live thermal printing at the Counter/Kitchen station.",
+      "type": "object",
+      "properties": {
+        "ownerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "storeId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ticketNumber": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "tableNumber": { "type": "string", "maxLength": 20 },
+        "orderType": { "type": "string", "enum": ["retail", "dine_in", "takeaway", "delivery"] },
+        "ticketKind": { "type": "string", "enum": ["new", "addon", "revised", "reprint"] },
+        "items": { "type": "array" },
+        "itemCount": { "type": "number" },
+        "changeNotes": { "type": "array" },
+        "customerName": { "type": "string", "maxLength": 80 },
+        "employeeId": { "type": "string", "maxLength": 128 },
+        "employeeName": { "type": "string", "maxLength": 80 },
+        "source": { "type": "string", "enum": ["waiter_mobile", "counter"] },
+        "status": { "type": "string", "enum": ["pending", "printed"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "ownerId",
+        "storeId",
+        "ticketNumber",
+        "tableNumber",
+        "orderType",
+        "ticketKind",
+        "items",
+        "itemCount",
+        "customerName",
+        "source",
+        "status",
+        "createdAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -395,6 +441,10 @@
     "/stores/{storeId}/waiterMembers/{memberUid}": {
       "schema": { "$ref": "#/entities/WaiterMember" },
       "description": "Verified waiter UID membership records used by Firestore security rules for synchronous revocation."
+    },
+    "/stores/{storeId}/kotQueue/{kotId}": {
+      "schema": { "$ref": "#/entities/KotTicket" },
+      "description": "Real-time cloud KOT print queue syncing mobile waiter orders directly to Counter/Kitchen thermal printers."
     }
   }
 }

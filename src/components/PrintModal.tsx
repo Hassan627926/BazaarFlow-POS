@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Download, ExternalLink, FileText, MessageCircle, Printer, X } from 'lucide-react';
 import type { PrintJob, Sale, StoreConfig } from '../types';
 import { formatDateTime, formatMoney } from '../utils/posHelpers';
@@ -9,6 +9,7 @@ interface PrintModalProps {
   job: PrintJob | null;
   store: StoreConfig;
   onClose: () => void;
+  onMarkKotPrinted?: (kotId: string) => void;
 }
 
 function formatWhatsAppNumber(raw: string, currency: string): string {
@@ -75,12 +76,18 @@ function buildWhatsAppReceiptText(sale: Sale, store: StoreConfig): string {
   return lines.join('\n');
 }
 
-export const PrintModal: React.FC<PrintModalProps> = ({ job, store, onClose }) => {
+export const PrintModal: React.FC<PrintModalProps> = ({
+  job,
+  store,
+  onClose,
+  onMarkKotPrinted,
+}) => {
   const [paperWidth, setPaperWidth] = useState<'80mm' | '58mm'>('80mm');
   const [whatsappPhone, setWhatsappPhone] = useState<string>('');
   const [pdfBusy, setPdfBusy] = useState<boolean>(false);
   const [pdfNotice, setPdfNotice] = useState<{ filename: string; mode: 'shared' | 'downloaded' } | null>(null);
   const [pdfError, setPdfError] = useState<string | null>(null);
+  const autoPrintedKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (job && job.type === 'receipt') {
@@ -90,9 +97,43 @@ export const PrintModal: React.FC<PrintModalProps> = ({ job, store, onClose }) =
     }
   }, [job]);
 
+  // Automatic print trigger for dedicated Counter/Kitchen KOT Auto-Print station
+  useEffect(() => {
+    if (!job || job.type !== 'kot' || !job.autoPrint) {
+      autoPrintedKeyRef.current = null;
+      return;
+    }
+    const key = job.kotId || job.sale.id;
+    if (autoPrintedKeyRef.current === key) return;
+    autoPrintedKeyRef.current = key;
+
+    const handleAfterPrint = () => {
+      if (job.kotId && onMarkKotPrinted) {
+        onMarkKotPrinted(job.kotId);
+      }
+      onClose();
+    };
+
+    window.addEventListener('afterprint', handleAfterPrint);
+    const timer = window.setTimeout(() => {
+      if (job.kotId && onMarkKotPrinted) {
+        onMarkKotPrinted(job.kotId);
+      }
+      window.print();
+    }, 240);
+
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener('afterprint', handleAfterPrint);
+    };
+  }, [job, onClose, onMarkKotPrinted]);
+
   if (!job) return null;
 
   const handlePrint = () => {
+    if (job.type === 'kot' && job.kotId && onMarkKotPrinted) {
+      onMarkKotPrinted(job.kotId);
+    }
     window.print();
   };
 
