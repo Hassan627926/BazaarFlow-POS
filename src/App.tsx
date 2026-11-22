@@ -54,7 +54,7 @@ import {
   RESTAURANT_STARTER_PRODUCTS,
   RETAIL_STARTER_PRODUCTS,
 } from './utils/posHelpers';
-import { playKitchenBellChime } from './utils/soundAlert';
+import { initKitchenAudioUnlock, playKitchenBellChime } from './utils/soundAlert';
 import { AnalyticsView } from './components/AnalyticsView';
 import { AuthScreen } from './components/AuthScreen';
 import { BarcodeStudioView } from './components/BarcodeStudioView';
@@ -115,6 +115,10 @@ function POSWorkspace() {
   const kotHydratedRef = useRef(false);
   const seenPendingKotIdsRef = useRef<Set<string>>(new Set());
   const autoDispatchedKotIdsRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    initKitchenAudioUnlock();
+  }, []);
 
   useEffect(() => {
     kotSoundEnabledRef.current = kotSoundEnabled;
@@ -635,7 +639,7 @@ function POSWorkspace() {
             }
           }
           if (hasNewPending && kotSoundEnabledRef.current) {
-            playKitchenBellChime();
+            void playKitchenBellChime();
           }
         }
       },

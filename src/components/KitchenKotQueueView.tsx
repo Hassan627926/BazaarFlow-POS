@@ -27,7 +27,7 @@ interface KitchenKotQueueViewProps {
   onPrintTicket: (ticket: KotTicket, autoPrint?: boolean) => void;
   onMarkPrinted: (ticketId: string) => Promise<void>;
   onClearPrinted: () => Promise<void>;
-  onTestBell: () => void;
+  onTestBell: () => Promise<boolean> | void;
 }
 
 const KIND_LABELS: Record<KotTicket['ticketKind'], { label: string; className: string }> = {
@@ -68,6 +68,7 @@ export const KitchenKotQueueView: React.FC<KitchenKotQueueViewProps> = ({
   const [busyId, setBusyId] = useState<string | null>(null);
   const [clearing, setClearing] = useState(false);
   const [copiedStationUrl, setCopiedStationUrl] = useState(false);
+  const [bellStatus, setBellStatus] = useState<'idle' | 'played' | 'blocked'>('idle');
 
   const stationUrl = useMemo(() => {
     if (typeof window === 'undefined') return '/?station=kot';
@@ -188,12 +189,28 @@ export const KitchenKotQueueView: React.FC<KitchenKotQueueViewProps> = ({
 
             <button
               type="button"
-              onClick={onTestBell}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
+              onClick={async () => {
+                const ok = await onTestBell();
+                setBellStatus(ok === false ? 'blocked' : 'played');
+                window.setTimeout(() => setBellStatus('idle'), 2200);
+              }}
+              className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium cursor-pointer transition-colors ${
+                bellStatus === 'played'
+                  ? 'border-emerald-300 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300'
+                  : bellStatus === 'blocked'
+                    ? 'border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300'
+                    : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800'
+              }`}
               title="Play test bell and enable audio in this browser tab"
             >
               <Volume2 className="w-3.5 h-3.5" />
-              <span>Test Bell</span>
+              <span>
+                {bellStatus === 'played'
+                  ? 'Bell Played!'
+                  : bellStatus === 'blocked'
+                    ? 'Browser Muted'
+                    : 'Test Bell'}
+              </span>
             </button>
 
             <button
