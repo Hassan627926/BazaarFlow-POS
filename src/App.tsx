@@ -1078,9 +1078,9 @@ function POSWorkspace() {
   const currentTabLabel = navItems.find((n) => n.id === activeTab)?.label ?? 'POS Billing';
 
   const renderSidebarContent = () => (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-full min-h-0">
       {/* Brand Workspace Switcher */}
-      <div className="p-4 border-b border-slate-200 dark:border-slate-800 relative">
+      <div className="p-4 border-b border-slate-200 dark:border-slate-800 relative shrink-0">
         <button
           type="button"
           onClick={() => setStoreMenuOpen((v) => !v)}
@@ -1165,7 +1165,7 @@ function POSWorkspace() {
       </div>
 
       {/* Primary Workspace Navigation */}
-      <nav className="flex-1 p-3 space-y-1 overflow-y-auto" aria-label="POS sections">
+      <nav className="flex-1 min-h-0 p-3 space-y-1 overflow-y-auto" aria-label="POS sections">
         {navItems.map(({ id, label, icon: Icon, badge }) => {
           const active = activeTab === id;
           return (
@@ -1197,7 +1197,7 @@ function POSWorkspace() {
       </nav>
 
       {/* Bottom Controls */}
-      <div className="p-3 border-t border-slate-200 dark:border-slate-800 space-y-2">
+      <div className="p-3 border-t border-slate-200 dark:border-slate-800 space-y-2 shrink-0">
         <div className="flex items-center gap-2">
           <PWAInstallButton compact />
           <button
@@ -1253,9 +1253,9 @@ function POSWorkspace() {
   );
 
   return (
-    <div className="min-h-screen bg-slate-50 dark:bg-slate-950 flex">
+    <div className="min-h-screen lg:h-screen lg:overflow-hidden print:h-auto print:overflow-visible bg-slate-50 dark:bg-slate-950 flex">
       {/* Desktop Sidebar */}
-      <aside className="hidden lg:block w-64 shrink-0 border-r border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 sticky top-0 h-screen no-print">
+      <aside className="hidden lg:flex lg:flex-col w-64 shrink-0 h-full border-r border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 no-print">
         {renderSidebarContent()}
       </aside>
 
@@ -1278,8 +1278,8 @@ function POSWorkspace() {
       )}
 
       {/* Main Content Shell */}
-      <div className="flex-1 flex flex-col min-w-0">
-        <header className="sticky top-0 z-20 h-14 border-b border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-slate-900/95 backdrop-blur-xs px-4 sm:px-6 flex items-center justify-between gap-4 no-print">
+      <div className="flex-1 flex flex-col min-w-0 lg:h-full lg:overflow-hidden print:h-auto print:overflow-visible">
+        <header className="sticky top-0 lg:static shrink-0 z-20 h-14 border-b border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-slate-900/95 backdrop-blur-xs px-4 sm:px-6 flex items-center justify-between gap-4 no-print">
           <div className="flex items-center gap-3 min-w-0">
             <button
               type="button"
@@ -1347,7 +1347,8 @@ function POSWorkspace() {
           </div>
         </header>
 
-        <main className="flex-1 p-4 sm:p-6 max-w-[1600px] w-full mx-auto no-print">
+        <main className="flex-1 lg:overflow-y-auto p-4 sm:p-6 w-full no-print">
+          <div className="max-w-[1600px] w-full mx-auto">
           {!storesLoaded ? (
             <div className="py-16 text-center text-sm text-slate-500 dark:text-slate-400">
               Loading your workspaces...
@@ -1564,6 +1565,7 @@ function POSWorkspace() {
               )}
             </>
           )}
+          </div>
         </main>
       </div>
 

@@ -1251,7 +1251,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
   };
 
   const renderCartPanel = () => (
-    <div className="flex flex-col max-h-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl overflow-y-auto">
+    <div className="flex flex-col h-full max-h-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl overflow-y-auto">
       <div className="flex items-center justify-between px-4 py-3 border-b border-slate-200 dark:border-slate-800 shrink-0">
         <div>
           <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
@@ -2538,7 +2538,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
       </div>
 
       {/* Desktop Sticky Cart Panel */}
-      <div className="hidden lg:block lg:col-span-4 lg:sticky lg:top-20 lg:max-h-[calc(100vh-5.5rem)]">
+      <div className="hidden lg:block lg:col-span-4 lg:sticky lg:top-0 lg:h-[calc(100vh-6.5rem)]">
         {renderCartPanel()}
       </div>
 
