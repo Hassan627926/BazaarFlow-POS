@@ -82,6 +82,11 @@ service cloud.firestore {
         get(/databases/$(database)/documents/waiterAccess/$(get(/databases/$(database)/documents/stores/$(storeId)/waiterMembers/$(request.auth.uid)).data.accessId)).data.canEditOrders == true;
     }
 
+    function waiterCanSettleBills(storeId) {
+      return !('canSettleBills' in get(/databases/$(database)/documents/waiterAccess/$(get(/databases/$(database)/documents/stores/$(storeId)/waiterMembers/$(request.auth.uid)).data.accessId)).data) ||
+        get(/databases/$(database)/documents/waiterAccess/$(get(/databases/$(database)/documents/stores/$(storeId)/waiterMembers/$(request.auth.uid)).data.accessId)).data.canSettleBills == true;
+    }
+
     function hasMatchingActiveGrant(data, storeId) {
       return isValidId(data.accessId) &&
         exists(/databases/$(database)/documents/waiterAccess/$(data.accessId)) &&
@@ -171,11 +176,10 @@ service cloud.firestore {
           'itemCount', 'subtotal', 'discount', 'taxRate', 'taxAmount',
           'total', 'totalCost', 'profit', 'paymentMethod', 'amountTendered',
           'changeDue', 'orderType', 'tableNumber', 'customerName',
-          'customerPhone', 'customerAddress', 'employeeId', 'employeeName', 'status',
-          'createdAt', 'updatedAt'
+          'customerPhone', 'customerAddress', 'employeeId', 'employeeName',
+          'settledBy', 'status', 'createdAt', 'updatedAt'
         ]) &&
         isValidId(data.ownerId) &&
-        data.ownerId == request.auth.uid &&
         isValidId(data.storeId) &&
         data.storeId == storeId &&
         data.invoiceNumber is string && data.invoiceNumber.size() >= 1 && data.invoiceNumber.size() <= 40 &&
@@ -199,6 +203,7 @@ service cloud.firestore {
         (!('customerAddress' in data) || (data.customerAddress is string && data.customerAddress.size() <= 220)) &&
         (!('employeeId' in data) || (data.employeeId is string && data.employeeId.size() <= 128)) &&
         (!('employeeName' in data) || (data.employeeName is string && data.employeeName.size() <= 80)) &&
+        (!('settledBy' in data) || data.settledBy in ['counter', 'waiter_mobile']) &&
         data.status in ['completed', 'voided'] &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
@@ -283,7 +288,8 @@ service cloud.firestore {
         data.keys().hasOnly([
           'ownerId', 'storeId', 'name', 'role', 'phone', 'cnic',
           'shift', 'notes', 'loginEmail', 'waiterUid', 'mobileAccess',
-          'canEditOrders', 'canPrintKot', 'canViewPrices', 'active', 'createdAt', 'updatedAt'
+          'canEditOrders', 'canPrintKot', 'canViewPrices', 'canSettleBills',
+          'active', 'createdAt', 'updatedAt'
         ]) &&
         isValidId(data.ownerId) &&
         data.ownerId == request.auth.uid &&
@@ -301,6 +307,7 @@ service cloud.firestore {
         (!('canEditOrders' in data) || data.canEditOrders is bool) &&
         (!('canPrintKot' in data) || data.canPrintKot is bool) &&
         (!('canViewPrices' in data) || data.canViewPrices is bool) &&
+        (!('canSettleBills' in data) || data.canSettleBills is bool) &&
         data.active is bool &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
@@ -313,8 +320,8 @@ service cloud.firestore {
         ]) &&
         data.keys().hasOnly([
           'ownerId', 'storeId', 'storeName', 'employeeId', 'employeeName',
-          'role', 'waiterEmail', 'waiterUid', 'canEditOrders', 'canPrintKot', 'canViewPrices',
-          'active', 'createdAt', 'updatedAt'
+          'role', 'waiterEmail', 'waiterUid', 'canEditOrders', 'canPrintKot',
+          'canViewPrices', 'canSettleBills', 'active', 'createdAt', 'updatedAt'
         ]) &&
         isValidId(data.ownerId) &&
         data.ownerId == request.auth.uid &&
@@ -328,6 +335,7 @@ service cloud.firestore {
         (!('canEditOrders' in data) || data.canEditOrders is bool) &&
         (!('canPrintKot' in data) || data.canPrintKot is bool) &&
         (!('canViewPrices' in data) || data.canViewPrices is bool) &&
+        (!('canSettleBills' in data) || data.canSettleBills is bool) &&
         data.active is bool &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
@@ -421,7 +429,7 @@ service cloud.firestore {
         isStoreOwner(existing().storeId) &&
         incoming().diff(existing()).affectedKeys().hasOnly([
           'storeName', 'employeeName', 'role', 'waiterEmail', 'waiterUid',
-          'canEditOrders', 'canPrintKot', 'canViewPrices', 'active', 'updatedAt'
+          'canEditOrders', 'canPrintKot', 'canViewPrices', 'canSettleBills', 'active', 'updatedAt'
         ]);
 
       allow delete: if isAuthenticatedUser() &&
@@ -614,8 +622,23 @@ service cloud.firestore {
           isValidSale(incoming(), storeId) &&
           incoming().status == 'completed' &&
           incoming().createdAt == request.time &&
-          incoming().updatedAt == request.time &&
-          isStoreOwner(storeId);
+          incoming().updatedAt == request.time && (
+            // Tier 1 (Owner): Full counter billing
+            (
+              incoming().ownerId == request.auth.uid &&
+              isStoreOwner(storeId)
+            ) ||
+            // Tier 2 (Authorized Waiter): Settle occupied restaurant dine-in table bill & alert Counter
+            (
+              isActiveWaiter(storeId) &&
+              isRestaurantStore(storeId) &&
+              waiterCanSettleBills(storeId) &&
+              incoming().ownerId == storeOwnerId(storeId) &&
+              incoming().orderType == 'dine_in' &&
+              'settledBy' in incoming() &&
+              incoming().settledBy == 'waiter_mobile'
+            )
+          );
 
         allow update: if isAuthenticatedUser() &&
           isValidId(storeId) &&
@@ -714,7 +737,11 @@ service cloud.firestore {
           isValidId(storeId) &&
           isValidId(tableId) && (
             (existing().ownerId == request.auth.uid && isStoreOwner(storeId)) ||
-            (isActiveWaiter(storeId) && isRestaurantStore(storeId) && waiterCanEditOrders(storeId))
+            (
+              isActiveWaiter(storeId) &&
+              isRestaurantStore(storeId) &&
+              (waiterCanEditOrders(storeId) || waiterCanSettleBills(storeId))
+            )
           );
       }
 
@@ -796,7 +823,7 @@ service cloud.firestore {
             incoming().diff(existing()).affectedKeys().hasOnly([
               'name', 'role', 'phone', 'cnic', 'shift', 'notes',
               'loginEmail', 'waiterUid', 'mobileAccess',
-              'canEditOrders', 'canPrintKot', 'canViewPrices', 'active', 'updatedAt'
+              'canEditOrders', 'canPrintKot', 'canViewPrices', 'canSettleBills', 'active', 'updatedAt'
             ])
           );
 

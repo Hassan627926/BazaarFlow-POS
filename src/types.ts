@@ -120,6 +120,7 @@ export interface Sale {
   customerAddress?: string;
   employeeId?: string;
   employeeName?: string;
+  settledBy?: 'counter' | 'waiter_mobile';
   status: SaleStatus;
   createdAt?: Timestamp | null;
   updatedAt?: Timestamp | null;
@@ -185,6 +186,7 @@ export interface Employee {
   canEditOrders?: boolean;
   canPrintKot?: boolean;
   canViewPrices?: boolean;
+  canSettleBills?: boolean;
   active: boolean;
   createdAt?: Timestamp | null;
   updatedAt?: Timestamp | null;
@@ -203,6 +205,7 @@ export interface WaiterAccess {
   canEditOrders?: boolean;
   canPrintKot?: boolean;
   canViewPrices?: boolean;
+  canSettleBills?: boolean;
   active: boolean;
   createdAt?: Timestamp | null;
   updatedAt?: Timestamp | null;

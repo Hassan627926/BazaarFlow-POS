@@ -1,12 +1,13 @@
 /**
- * Reliable restaurant kitchen order bell chime.
+ * Reliable restaurant order & bill-cleared bell chimes.
  * Uses a persistent singleton Web Audio API AudioContext unlocked on the first user
- * interaction, with an auto-generated PCM WAV <audio> fallback so incoming waiter KOTs
- * chime reliably across Chrome, Edge, Safari, and desktop PWAs.
+ * interaction, with auto-generated PCM WAV <audio> fallbacks so incoming waiter KOTs
+ * and waiter-cleared table bills chime reliably across Chrome, Edge, Safari, and PWAs.
  */
 
 let sharedAudioCtx: AudioContext | null = null;
-let cachedBellWavUrl: string | null = null;
+let cachedKotWavUrl: string | null = null;
+let cachedBillWavUrl: string | null = null;
 let unlockListenersAttached = false;
 
 function getAudioContextConstructor(): typeof AudioContext | null {
@@ -32,17 +33,32 @@ function getOrCreateAudioContext(): AudioContext | null {
   }
 }
 
-/**
- * Generates a tiny in-memory 16-bit PCM WAV data URL for a crisp two-tone kitchen bell.
- * Used as a fallback whenever Web Audio API cannot resume or is unavailable.
- */
-function getBellWavDataUrl(): string | null {
-  if (cachedBellWavUrl) return cachedBellWavUrl;
+interface ChimeNote {
+  freq: number;
+  overtone: number;
+  startSec: number;
+  durationSec: number;
+  decayRate: number;
+  gain: number;
+}
+
+const KOT_CHIME_NOTES: ChimeNote[] = [
+  { freq: 880, overtone: 1760, startSec: 0, durationSec: 0.45, decayRate: 8.5, gain: 0.58 },
+  { freq: 1174.66, overtone: 2349.32, startSec: 0.18, durationSec: 0.65, decayRate: 6.0, gain: 0.64 },
+];
+
+// Bright ascending 3-note cash register chime (C6 -> E6 -> G6) for Bill Cleared alerts
+const BILL_CHIME_NOTES: ChimeNote[] = [
+  { freq: 1046.5, overtone: 2093.0, startSec: 0, durationSec: 0.35, decayRate: 9.0, gain: 0.52 },
+  { freq: 1318.51, overtone: 2637.02, startSec: 0.14, durationSec: 0.38, decayRate: 8.5, gain: 0.56 },
+  { freq: 1567.98, overtone: 3135.96, startSec: 0.28, durationSec: 0.65, decayRate: 5.5, gain: 0.64 },
+];
+
+function buildWavDataUrl(notes: ChimeNote[], totalDurationSec: number): string | null {
   if (typeof window === 'undefined' || typeof btoa === 'undefined') return null;
   try {
     const sampleRate = 22050;
-    const durationSec = 0.85;
-    const numSamples = Math.floor(sampleRate * durationSec);
+    const numSamples = Math.floor(sampleRate * totalDurationSec);
     const dataSize = numSamples * 2;
     const buffer = new ArrayBuffer(44 + dataSize);
     const view = new DataView(buffer);
@@ -71,25 +87,19 @@ function getBellWavDataUrl(): string | null {
       const t = i / sampleRate;
       let sample = 0;
 
-      // Ding 1: A5 (880Hz) + bright overtone (1760Hz) from 0.00s to 0.45s
-      if (t >= 0 && t < 0.45) {
-        const env1 = Math.min(1, t / 0.008) * Math.exp(-t * 8.5);
-        sample +=
-          env1 *
-          (0.62 * Math.sin(2 * Math.PI * 880 * t) + 0.25 * Math.sin(2 * Math.PI * 1760 * t));
+      for (const note of notes) {
+        if (t >= note.startSec && t < note.startSec + note.durationSec) {
+          const dt = t - note.startSec;
+          const env = Math.min(1, dt / 0.008) * Math.exp(-dt * note.decayRate);
+          sample +=
+            env *
+            note.gain *
+            (0.75 * Math.sin(2 * Math.PI * note.freq * dt) +
+              0.25 * Math.sin(2 * Math.PI * note.overtone * dt));
+        }
       }
 
-      // Ding 2: D6 (1174.66Hz) + bright overtone (2349.32Hz) from 0.18s to 0.85s
-      if (t >= 0.18) {
-        const dt = t - 0.18;
-        const env2 = Math.min(1, dt / 0.008) * Math.exp(-dt * 6.0);
-        sample +=
-          env2 *
-          (0.68 * Math.sin(2 * Math.PI * 1174.66 * dt) +
-            0.26 * Math.sin(2 * Math.PI * 2349.32 * dt));
-      }
-
-      const clamped = Math.max(-1, Math.min(1, sample * 0.85));
+      const clamped = Math.max(-1, Math.min(1, sample * 0.9));
       view.setInt16(44 + i * 2, Math.round(clamped * 32767), true);
     }
 
@@ -99,8 +109,7 @@ function getBellWavDataUrl(): string | null {
     for (let i = 0; i < bytes.length; i += chunkSize) {
       binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
     }
-    cachedBellWavUrl = `data:audio/wav;base64,${btoa(binary)}`;
-    return cachedBellWavUrl;
+    return `data:audio/wav;base64,${btoa(binary)}`;
   } catch {
     return null;
   }
@@ -108,7 +117,7 @@ function getBellWavDataUrl(): string | null {
 
 /**
  * Unlocks the shared AudioContext on the first user click/tap/keypress so future
- * real-time Firestore order arrivals can play the bell without autoplay blocking.
+ * real-time Firestore order and bill arrivals can chime without autoplay blocking.
  */
 export function initKitchenAudioUnlock(): void {
   if (typeof window === 'undefined' || unlockListenersAttached) return;
@@ -126,50 +135,55 @@ export function initKitchenAudioUnlock(): void {
   window.addEventListener('keydown', unlock, { passive: true });
 }
 
-function scheduleBellOnContext(ctx: AudioContext): void {
+function scheduleNotesOnContext(ctx: AudioContext, notes: ChimeNote[]): void {
   const now = ctx.currentTime + 0.015;
 
-  const strike = (
-    fundamental: number,
-    overtone: number,
-    startOffset: number,
-    duration: number,
-    peakGain: number
-  ) => {
-    // Fundamental tone
+  for (const note of notes) {
     const osc1 = ctx.createOscillator();
     const gain1 = ctx.createGain();
     osc1.type = 'triangle';
-    osc1.frequency.setValueAtTime(fundamental, now + startOffset);
-    gain1.gain.setValueAtTime(0.0001, now + startOffset);
-    gain1.gain.linearRampToValueAtTime(peakGain, now + startOffset + 0.012);
-    gain1.gain.exponentialRampToValueAtTime(0.0001, now + startOffset + duration);
+    osc1.frequency.setValueAtTime(note.freq, now + note.startSec);
+    gain1.gain.setValueAtTime(0.0001, now + note.startSec);
+    gain1.gain.linearRampToValueAtTime(note.gain, now + note.startSec + 0.012);
+    gain1.gain.exponentialRampToValueAtTime(0.0001, now + note.startSec + note.durationSec);
     osc1.connect(gain1);
     gain1.connect(ctx.destination);
-    osc1.start(now + startOffset);
-    osc1.stop(now + startOffset + duration + 0.03);
+    osc1.start(now + note.startSec);
+    osc1.stop(now + note.startSec + note.durationSec + 0.03);
 
-    // Metallic bell overtone
     const osc2 = ctx.createOscillator();
     const gain2 = ctx.createGain();
     osc2.type = 'sine';
-    osc2.frequency.setValueAtTime(overtone, now + startOffset);
-    gain2.gain.setValueAtTime(0.0001, now + startOffset);
-    gain2.gain.linearRampToValueAtTime(peakGain * 0.42, now + startOffset + 0.01);
-    gain2.gain.exponentialRampToValueAtTime(0.0001, now + startOffset + duration * 0.72);
+    osc2.frequency.setValueAtTime(note.overtone, now + note.startSec);
+    gain2.gain.setValueAtTime(0.0001, now + note.startSec);
+    gain2.gain.linearRampToValueAtTime(note.gain * 0.42, now + note.startSec + 0.01);
+    gain2.gain.exponentialRampToValueAtTime(0.0001, now + note.startSec + note.durationSec * 0.72);
     osc2.connect(gain2);
     gain2.connect(ctx.destination);
-    osc2.start(now + startOffset);
-    osc2.stop(now + startOffset + duration + 0.03);
-  };
-
-  // Loud, clear two-tone restaurant kitchen bell (A5 -> D6)
-  strike(880, 1760, 0, 0.36, 0.55);
-  strike(1174.66, 2349.32, 0.18, 0.58, 0.62);
+    osc2.start(now + note.startSec);
+    osc2.stop(now + note.startSec + note.durationSec + 0.03);
+  }
 }
 
-async function playFallbackAudioElement(): Promise<boolean> {
-  const wavUrl = getBellWavDataUrl();
+async function playChime(notes: ChimeNote[], getWavUrl: () => string | null): Promise<boolean> {
+  if (typeof window === 'undefined') return false;
+
+  try {
+    const ctx = getOrCreateAudioContext();
+    if (ctx) {
+      if (ctx.state === 'suspended') {
+        await ctx.resume();
+      }
+      if (ctx.state === 'running') {
+        scheduleNotesOnContext(ctx, notes);
+        return true;
+      }
+    }
+  } catch {
+    // Fall through to HTMLAudioElement fallback
+  }
+
+  const wavUrl = getWavUrl();
   if (!wavUrl) return false;
   try {
     const audio = new Audio(wavUrl);
@@ -182,26 +196,25 @@ async function playFallbackAudioElement(): Promise<boolean> {
 }
 
 /**
- * Plays a loud, unmistakable two-tone restaurant kitchen bell chime.
- * Returns true if audio playback succeeded, or false if blocked by browser policy.
+ * Plays a loud, unmistakable two-tone restaurant kitchen bell chime (A5 -> D6) for incoming KOTs.
  */
 export async function playKitchenBellChime(): Promise<boolean> {
-  if (typeof window === 'undefined') return false;
-
-  try {
-    const ctx = getOrCreateAudioContext();
-    if (ctx) {
-      if (ctx.state === 'suspended') {
-        await ctx.resume();
-      }
-      if (ctx.state === 'running') {
-        scheduleBellOnContext(ctx);
-        return true;
-      }
+  return playChime(KOT_CHIME_NOTES, () => {
+    if (!cachedKotWavUrl) {
+      cachedKotWavUrl = buildWavDataUrl(KOT_CHIME_NOTES, 0.85);
     }
-  } catch {
-    // Fall through to HTMLAudioElement fallback
-  }
+    return cachedKotWavUrl;
+  });
+}
 
-  return playFallbackAudioElement();
+/**
+ * Plays a distinct bright three-tone cash register chime (C6 -> E6 -> G6) when a waiter clears a table bill.
+ */
+export async function playBillClearedChime(): Promise<boolean> {
+  return playChime(BILL_CHIME_NOTES, () => {
+    if (!cachedBillWavUrl) {
+      cachedBillWavUrl = buildWavDataUrl(BILL_CHIME_NOTES, 0.96);
+    }
+    return cachedBillWavUrl;
+  });
 }

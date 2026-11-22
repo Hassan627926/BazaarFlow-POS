@@ -96,6 +96,7 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
   const [canEditOrders, setCanEditOrders] = useState(true);
   const [canPrintKot, setCanPrintKot] = useState(true);
   const [canViewPrices, setCanViewPrices] = useState(true);
+  const [canSettleBills, setCanSettleBills] = useState(true);
   const [active, setActive] = useState(true);
 
   const [accessMap, setAccessMap] = useState<Map<string, WaiterAccess>>(new Map());
@@ -310,6 +311,7 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
     setCanEditOrders(true);
     setCanPrintKot(true);
     setCanViewPrices(true);
+    setCanSettleBills(true);
     setActive(true);
     setFormError(null);
     setModalOpen(true);
@@ -336,6 +338,7 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
     setCanEditOrders(emp.canEditOrders !== false);
     setCanPrintKot(emp.canPrintKot !== false);
     setCanViewPrices(emp.canViewPrices !== false);
+    setCanSettleBills(emp.canSettleBills !== false);
     setActive(emp.active);
     setFormError(null);
     setModalOpen(true);
@@ -438,6 +441,7 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
         canEditOrders: enableMobile ? canEditOrders : true,
         canPrintKot: enableMobile ? canPrintKot : true,
         canViewPrices: enableMobile ? canViewPrices : true,
+        canSettleBills: enableMobile ? canSettleBills : true,
         active,
       };
 
@@ -474,6 +478,7 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
               canEditOrders,
               canPrintKot,
               canViewPrices,
+              canSettleBills,
               active: grantActive,
               updatedAt: serverTimestamp(),
             });
@@ -490,6 +495,7 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
               canEditOrders,
               canPrintKot,
               canViewPrices,
+              canSettleBills,
               active: grantActive,
               createdAt: serverTimestamp(),
               updatedAt: serverTimestamp(),
@@ -1301,6 +1307,15 @@ export const EmployeesView: React.FC<EmployeesViewProps> = ({
                             className="rounded border-slate-300"
                           />
                           <span>View Menu Item Prices &amp; Table Subtotals</span>
+                        </label>
+                        <label className="flex items-center gap-2 text-xs text-slate-700 dark:text-slate-300 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={canSettleBills}
+                            onChange={(e) => setCanSettleBills(e.target.checked)}
+                            className="rounded border-slate-300"
+                          />
+                          <span>Collect Cash &amp; Complete Table Bills (Alert Counter)</span>
                         </label>
                         <p className="text-[10px] text-slate-400 pt-0.5">
                           Sales reports, profit, cost prices, inventory edits, and store settings are always blocked for waiters.

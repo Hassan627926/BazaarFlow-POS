@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { getRedirectResult, onAuthStateChanged, signOut, type User } from 'firebase/auth';
 import {
+  Banknote,
   BarChart3,
   Barcode,
   Bell,
@@ -49,12 +50,17 @@ import {
   type WaiterAccess,
 } from './types';
 import {
+  formatMoney,
   generateSafeId,
   getTodayDateKey,
   RESTAURANT_STARTER_PRODUCTS,
   RETAIL_STARTER_PRODUCTS,
 } from './utils/posHelpers';
-import { initKitchenAudioUnlock, playKitchenBellChime } from './utils/soundAlert';
+import {
+  initKitchenAudioUnlock,
+  playBillClearedChime,
+  playKitchenBellChime,
+} from './utils/soundAlert';
 import { AnalyticsView } from './components/AnalyticsView';
 import { AuthScreen } from './components/AuthScreen';
 import { BarcodeStudioView } from './components/BarcodeStudioView';
@@ -115,6 +121,9 @@ function POSWorkspace() {
   const kotHydratedRef = useRef(false);
   const seenPendingKotIdsRef = useRef<Set<string>>(new Set());
   const autoDispatchedKotIdsRef = useRef<Set<string>>(new Set());
+  const salesHydratedRef = useRef(false);
+  const seenWaiterBillIdsRef = useRef<Set<string>>(new Set());
+  const [recentWaiterBills, setRecentWaiterBills] = useState<Sale[]>([]);
 
   useEffect(() => {
     initKitchenAudioUnlock();
@@ -245,9 +254,12 @@ function POSWorkspace() {
         setCustomers([]);
         setEmployees([]);
         setKotTickets([]);
+        setRecentWaiterBills([]);
         kotHydratedRef.current = false;
         seenPendingKotIdsRef.current.clear();
         autoDispatchedKotIdsRef.current.clear();
+        salesHydratedRef.current = false;
+        seenWaiterBillIdsRef.current.clear();
         setWaiterGrants([]);
         setWaiterGrantsLoaded(false);
         setWaiterMemberReady(false);
@@ -514,15 +526,21 @@ function POSWorkspace() {
       setCustomers([]);
       setEmployees([]);
       setKotTickets([]);
+      setRecentWaiterBills([]);
       kotHydratedRef.current = false;
       seenPendingKotIdsRef.current.clear();
       autoDispatchedKotIdsRef.current.clear();
+      salesHydratedRef.current = false;
+      seenWaiterBillIdsRef.current.clear();
       return;
     }
 
     kotHydratedRef.current = false;
     seenPendingKotIdsRef.current.clear();
     autoDispatchedKotIdsRef.current.clear();
+    salesHydratedRef.current = false;
+    seenWaiterBillIdsRef.current.clear();
+    setRecentWaiterBills([]);
 
     const productsPath = `stores/${activeStoreId}/products`;
     const salesPath = `stores/${activeStoreId}/sales`;
@@ -558,6 +576,29 @@ function POSWorkspace() {
           return tB - tA;
         });
         setSales(list);
+
+        // Live Bell & Alert on Counter Laptop whenever a Waiter clears a Table Bill from Mobile
+        const waiterBills = list.filter(
+          (s) => s.settledBy === 'waiter_mobile' && s.status === 'completed'
+        );
+        if (!salesHydratedRef.current) {
+          waiterBills.forEach((s) => seenWaiterBillIdsRef.current.add(s.id));
+          salesHydratedRef.current = true;
+        } else {
+          const newlyCleared: Sale[] = [];
+          for (const s of waiterBills) {
+            if (!seenWaiterBillIdsRef.current.has(s.id)) {
+              seenWaiterBillIdsRef.current.add(s.id);
+              newlyCleared.push(s);
+            }
+          }
+          if (newlyCleared.length > 0) {
+            setRecentWaiterBills((prev) => [...newlyCleared, ...prev].slice(0, 10));
+            if (kotSoundEnabledRef.current) {
+              void playBillClearedChime();
+            }
+          }
+        }
       },
       (err) => reportSnapshotError(err, OperationType.LIST, salesPath)
     );
@@ -1258,6 +1299,16 @@ function POSWorkspace() {
           </div>
 
           <div className="flex items-center gap-2 shrink-0">
+            {!isRetail && activeStore && recentWaiterBills.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setPrintJob({ type: 'receipt', sale: recentWaiterBills[0] })}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-300 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950/50 px-3 py-1.5 text-xs font-semibold text-emerald-800 dark:text-emerald-300 hover:bg-emerald-100 dark:hover:bg-emerald-950/80 whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                <Banknote className="w-3.5 h-3.5" />
+                <span>{recentWaiterBills.length} Bill Cleared</span>
+              </button>
+            )}
             {!isRetail && activeStore && pendingKotTickets.length > 0 && (
               <button
                 type="button"
@@ -1319,6 +1370,69 @@ function POSWorkspace() {
             </div>
           ) : (
             <>
+              {!isRetail && recentWaiterBills.length > 0 && (
+                <div className="mb-4 space-y-2">
+                  {recentWaiterBills.slice(0, 3).map((bill) => (
+                    <div
+                      key={bill.id}
+                      className="rounded-xl border border-emerald-300 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/40 px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                    >
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div className="w-8 h-8 rounded-lg bg-emerald-600 text-white flex items-center justify-center shrink-0">
+                          <Banknote className="w-4 h-4" />
+                        </div>
+                        <div className="min-w-0">
+                          <div className="text-xs font-bold text-emerald-950 dark:text-emerald-100">
+                            Table {bill.tableNumber || '—'} Bill Cleared by Waiter
+                            {bill.employeeName ? ` (${bill.employeeName})` : ''}
+                          </div>
+                          <div className="text-xs text-emerald-800 dark:text-emerald-300 truncate">
+                            {bill.paymentMethod.replace('_', '/').toUpperCase()} · Total{' '}
+                            <strong className="font-mono">
+                              {formatMoney(bill.total, activeStore.currency)}
+                            </strong>
+                            {bill.paymentMethod === 'cash' && (
+                              <>
+                                {' · '}Received{' '}
+                                <span className="font-mono">
+                                  {formatMoney(bill.amountTendered, activeStore.currency)}
+                                </span>
+                                {bill.changeDue > 0 && (
+                                  <>
+                                    {' · '}Return{' '}
+                                    <span className="font-mono">
+                                      {formatMoney(bill.changeDue, activeStore.currency)}
+                                    </span>
+                                  </>
+                                )}
+                              </>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => setPrintJob({ type: 'receipt', sale: bill })}
+                          className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 px-3.5 py-2 text-xs font-semibold text-white cursor-pointer"
+                        >
+                          <Printer className="w-3.5 h-3.5" />
+                          <span>Print Receipt</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setRecentWaiterBills((prev) => prev.filter((b) => b.id !== bill.id))
+                          }
+                          className="inline-flex items-center gap-1 rounded-lg border border-emerald-300 dark:border-emerald-700 bg-white dark:bg-slate-900 px-3 py-2 text-xs font-semibold text-emerald-900 dark:text-emerald-200 hover:bg-emerald-100/60 dark:hover:bg-emerald-950/60 cursor-pointer"
+                        >
+                          <span>Done</span>
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
               {!isRetail && pendingKotTickets.length > 0 && activeTab !== 'kot_queue' && (
                 <div className="mb-4 rounded-xl border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/40 px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                   <div className="flex items-center gap-3 min-w-0">

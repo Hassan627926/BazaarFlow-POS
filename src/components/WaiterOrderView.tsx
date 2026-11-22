@@ -1,14 +1,18 @@
 import React, { useMemo, useState } from 'react';
 import {
   ArrowLeft,
+  Banknote,
   Check,
+  CreditCard,
   Edit3,
   KeyRound,
+  Landmark,
   LogOut,
   Minus,
   Moon,
   Plus,
   Printer,
+  Receipt,
   Search,
   ShoppingBag,
   Store,
@@ -16,6 +20,7 @@ import {
   Trash2,
   UserCheck,
   UtensilsCrossed,
+  X,
 } from 'lucide-react';
 import { doc, serverTimestamp, setDoc, writeBatch } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '../firebase';
@@ -23,6 +28,7 @@ import {
   BLUEPRINT_LIMITS,
   type CartItem,
   type Employee,
+  type PaymentMethod,
   type PrintJob,
   type Product,
   type Sale,
@@ -31,7 +37,12 @@ import {
   type TableSession,
   type WaiterAccess,
 } from '../types';
-import { formatMoney, generateSafeId, getTodayDateKey } from '../utils/posHelpers';
+import {
+  formatMoney,
+  generateInvoiceNumber,
+  generateSafeId,
+  getTodayDateKey,
+} from '../utils/posHelpers';
 import { PWAInstallButton } from './PWAInstallButton';
 
 interface WaiterOrderViewProps {
@@ -97,6 +108,7 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
   const canEditOrders = waiterGrant ? waiterGrant.canEditOrders !== false : true;
   const canPrintKot = waiterGrant ? waiterGrant.canPrintKot !== false : true;
   const canViewPrices = waiterGrant ? waiterGrant.canViewPrices !== false : true;
+  const canSettleBills = waiterGrant ? waiterGrant.canSettleBills !== false : true;
 
   const activeEmployees = useMemo(() => employees.filter((e) => e.active), [employees]);
   const [ownerSelectedEmpId, setOwnerSelectedEmpId] = useState<string>('');
@@ -111,12 +123,17 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
   const [editingOrder, setEditingOrder] = useState<boolean>(false);
   const [editItems, setEditItems] = useState<SaleItem[]>([]);
 
+  // Waiter Cash / Table Bill Settlement Modal state
+  const [billModalOpen, setBillModalOpen] = useState<boolean>(false);
+  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('cash');
+  const [cashReceived, setCashReceived] = useState<string>('');
+  const [settlingBill, setSettlingBill] = useState<boolean>(false);
+  const [billError, setBillError] = useState<string | null>(null);
+
   const [submitting, setSubmitting] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [noticeMsg, setNoticeMsg] = useState<string | null>(null);
-  const [lastQueuedKotJob, setLastQueuedKotJob] = useState<Extract<PrintJob, { type: 'kot' }> | null>(
-    null
-  );
+  const [lastQueuedKotJob, setLastQueuedKotJob] = useState<PrintJob | null>(null);
 
   // Resolve active waiter identity (locked to waiterGrant when signed in as waiter)
   const effectiveWaiter = useMemo(() => {
@@ -260,13 +277,142 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
     [cart]
   );
 
-  const flashNotice = (msg: string, kotJob?: Extract<PrintJob, { type: 'kot' }> | null) => {
+  const flashNotice = (msg: string, printPreviewJob?: PrintJob | null) => {
     setNoticeMsg(msg);
-    setLastQueuedKotJob(kotJob ?? null);
+    setLastQueuedKotJob(printPreviewJob ?? null);
     window.setTimeout(() => {
       setNoticeMsg(null);
       setLastQueuedKotJob(null);
     }, 6500);
+  };
+
+  const billCalculations = useMemo(() => {
+    if (!activeTableSession) {
+      return { subtotal: 0, taxRate: store.taxRate ?? 0, taxAmount: 0, total: 0, tendered: 0, changeDue: 0 };
+    }
+    const subtotal = Number(activeTableSession.subtotal.toFixed(2));
+    const taxRate = Number(store.taxRate ?? 0);
+    const taxAmount = Number(((subtotal * taxRate) / 100).toFixed(2));
+    const total = Number((subtotal + taxAmount).toFixed(2));
+    const parsedCash = Number(cashReceived);
+    const tendered =
+      paymentMethod === 'cash'
+        ? Number.isFinite(parsedCash) && parsedCash > 0
+          ? Number(parsedCash.toFixed(2))
+          : 0
+        : total;
+    const changeDue =
+      paymentMethod === 'cash' ? Math.max(0, Number((tendered - total).toFixed(2))) : 0;
+    return { subtotal, taxRate, taxAmount, total, tendered, changeDue };
+  }, [activeTableSession, store.taxRate, cashReceived, paymentMethod]);
+
+  const openBillModal = () => {
+    if (!activeTableSession || !canSettleBills) return;
+    const subtotal = Number(activeTableSession.subtotal.toFixed(2));
+    const taxRate = Number(store.taxRate ?? 0);
+    const total = Number((subtotal + (subtotal * taxRate) / 100).toFixed(2));
+    setPaymentMethod('cash');
+    setCashReceived(String(total));
+    setBillError(null);
+    setBillModalOpen(true);
+  };
+
+  const handleSettleTableBill = async () => {
+    if (!activeTableSession || !selectedTable || !canSettleBills) return;
+    if (paymentMethod === 'cash' && billCalculations.tendered < billCalculations.total) {
+      setBillError(
+        `Cash received (${formatMoney(billCalculations.tendered, store.currency)}) is less than bill total (${formatMoney(
+          billCalculations.total,
+          store.currency
+        )}).`
+      );
+      return;
+    }
+
+    setSettlingBill(true);
+    setBillError(null);
+
+    const saleId = generateSafeId('sale');
+    const invoiceNumber = generateInvoiceNumber(store.name);
+    const dateKey = getTodayDateKey();
+    const tableId = `table_${selectedTable.replace(/[^a-zA-Z0-9_\-]/g, '')}`;
+    const salePath = `stores/${store.id}/sales/${saleId}`;
+
+    const totalCost = Number(activeTableSession.totalCost.toFixed(2));
+    const profit = Number((billCalculations.subtotal - totalCost).toFixed(2));
+    const empId = (activeTableSession.employeeId || effectiveWaiter.id || '').slice(0, 128);
+    const empName = (activeTableSession.employeeName || effectiveWaiter.name || '').slice(
+      0,
+      BLUEPRINT_LIMITS.EMPLOYEE_NAME_MAX
+    );
+    const cleanGuest = (guestName.trim() || activeTableSession.customerName || '').slice(
+      0,
+      BLUEPRINT_LIMITS.CUSTOMER_NAME_MAX
+    );
+    const settledBySource: 'waiter_mobile' | 'counter' = waiterGrant ? 'waiter_mobile' : 'counter';
+
+    const saleRecord = {
+      ownerId: store.ownerId,
+      storeId: store.id,
+      invoiceNumber,
+      dateKey,
+      items: activeTableSession.items,
+      itemCount: activeTableSession.itemCount,
+      subtotal: billCalculations.subtotal,
+      discount: 0,
+      taxRate: billCalculations.taxRate,
+      taxAmount: billCalculations.taxAmount,
+      total: billCalculations.total,
+      totalCost,
+      profit,
+      paymentMethod,
+      amountTendered: billCalculations.tendered,
+      changeDue: billCalculations.changeDue,
+      orderType: 'dine_in' as const,
+      tableNumber: selectedTable,
+      customerName: cleanGuest,
+      employeeId: empId,
+      employeeName: empName,
+      settledBy: settledBySource,
+      status: 'completed' as const,
+    };
+
+    try {
+      const batch = writeBatch(db);
+      batch.set(doc(db, 'stores', store.id, 'sales', saleId), {
+        ...saleRecord,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+      batch.delete(doc(db, 'stores', store.id, 'tables', tableId));
+      await batch.commit();
+
+      const receiptSale: Sale = {
+        id: saleId,
+        ...saleRecord,
+        createdAt: null,
+        updatedAt: null,
+      };
+      const clearedTableNum = selectedTable;
+      setBillModalOpen(false);
+      closeTable();
+      flashNotice(
+        `Table ${clearedTableNum} bill cleared (${paymentMethod.replace('_', '/').toUpperCase()} ${formatMoney(
+          billCalculations.total,
+          store.currency
+        )})! Counter Laptop notified.`,
+        { type: 'receipt', sale: receiptSale }
+      );
+    } catch (err) {
+      setBillError(
+        err instanceof Error
+          ? err.message
+          : 'Unable to complete table bill. Ask the Owner to check Waiter Bill Settlement access & Firestore rules.'
+      );
+      handleFirestoreError(err, OperationType.CREATE, salePath);
+    } finally {
+      setSettlingBill(false);
+    }
   };
 
   const openTable = (num: string) => {
@@ -274,6 +420,8 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
     setCart([]);
     setEditingOrder(false);
     setEditItems([]);
+    setBillModalOpen(false);
+    setBillError(null);
     setErrorMsg(null);
     const existing = tableSessionMap.get(num);
     setGuestName(existing?.customerName || '');
@@ -284,6 +432,8 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
     setCart([]);
     setEditingOrder(false);
     setEditItems([]);
+    setBillModalOpen(false);
+    setBillError(null);
     setGuestName('');
     setErrorMsg(null);
   };
@@ -909,7 +1059,9 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
               className="inline-flex items-center gap-1 rounded-lg border border-emerald-300 dark:border-emerald-800 bg-white dark:bg-slate-900 px-2.5 py-1 text-[11px] font-semibold text-emerald-800 dark:text-emerald-300 shrink-0 cursor-pointer"
             >
               <Printer className="w-3 h-3" />
-              <span>Print on Phone</span>
+              <span>
+                {lastQueuedKotJob.type === 'receipt' ? 'Print Receipt' : 'Print on Phone'}
+              </span>
             </button>
           )}
         </div>
@@ -1088,8 +1240,18 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
                 </div>
               </div>
 
-              {activeTableSession && !editingOrder && (canEditOrders || canPrintKot) && (
-                <div className="flex items-center gap-1.5">
+              {activeTableSession && !editingOrder && (canEditOrders || canPrintKot || canSettleBills) && (
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {canSettleBills && (
+                    <button
+                      type="button"
+                      onClick={openBillModal}
+                      className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 px-2.5 py-1.5 text-xs font-semibold text-white cursor-pointer"
+                    >
+                      <Banknote className="w-3.5 h-3.5" />
+                      <span>Complete Bill</span>
+                    </button>
+                  )}
                   {canEditOrders && (
                     <button
                       type="button"
@@ -1188,11 +1350,23 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
                     </div>
                   ))}
                 </div>
-                <p className="text-[11px] text-amber-800/80 dark:text-amber-300/80">
-                  {canEditOrders
-                    ? 'Tap dishes below to send an Add-On order, or use - / + above to edit this order.'
-                    : 'Tap dishes below to send an Add-On order for this table.'}
-                </p>
+                <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                  <p className="text-[11px] text-amber-800/80 dark:text-amber-300/80">
+                    {canEditOrders
+                      ? 'Tap dishes below to send an Add-On, edit items above, or collect cash to clear table.'
+                      : 'Tap dishes below to send an Add-On, or collect cash to clear table.'}
+                  </p>
+                  {canSettleBills && (
+                    <button
+                      type="button"
+                      onClick={openBillModal}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 px-3 py-1.5 text-xs font-semibold text-white shrink-0 cursor-pointer"
+                    >
+                      <Receipt className="w-3.5 h-3.5" />
+                      <span>Collect Payment &amp; Clear Table</span>
+                    </button>
+                  )}
+                </div>
               </div>
             )}
 
@@ -1506,6 +1680,176 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
                   </button>
                 </div>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Waiter Table Payment & Bill Completion Modal */}
+      {billModalOpen && activeTableSession && (
+        <div
+          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-slate-950/65 p-0 sm:p-4"
+          role="dialog"
+          aria-modal="true"
+        >
+          <div className="w-full sm:max-w-md rounded-t-2xl sm:rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-start justify-between gap-2">
+              <div>
+                <h3 className="text-base font-bold font-display text-slate-900 dark:text-slate-100">
+                  Complete Bill — Table {selectedTable}
+                </h3>
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  Collect payment from guest. Counter Laptop will ring &amp; clear this table live.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setBillModalOpen(false)}
+                className="rounded-lg p-1.5 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                aria-label="Close payment modal"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Bill Breakdown */}
+            <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 p-3.5 space-y-1.5 text-xs">
+              <div className="flex items-center justify-between text-slate-600 dark:text-slate-400">
+                <span>Subtotal ({activeTableSession.itemCount} items)</span>
+                <span className="font-mono tabular-nums">
+                  {formatMoney(billCalculations.subtotal, store.currency)}
+                </span>
+              </div>
+              {billCalculations.taxRate > 0 && (
+                <div className="flex items-center justify-between text-slate-600 dark:text-slate-400">
+                  <span>Tax ({billCalculations.taxRate}%)</span>
+                  <span className="font-mono tabular-nums">
+                    {formatMoney(billCalculations.taxAmount, store.currency)}
+                  </span>
+                </div>
+              )}
+              <div className="pt-2 mt-1 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between text-base font-bold text-slate-900 dark:text-slate-100">
+                <span>Total Bill</span>
+                <span className="font-mono tabular-nums text-emerald-700 dark:text-emerald-400">
+                  {formatMoney(billCalculations.total, store.currency)}
+                </span>
+              </div>
+            </div>
+
+            {/* Payment Method Selector */}
+            <div className="space-y-1.5">
+              <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300">
+                Payment Method
+              </label>
+              <div className="grid grid-cols-3 gap-2">
+                {(
+                  [
+                    { id: 'cash', label: 'Cash', icon: Banknote },
+                    { id: 'card', label: 'Card', icon: CreditCard },
+                    { id: 'bank_qr', label: 'Bank / QR', icon: Landmark },
+                  ] as const
+                ).map(({ id, label, icon: Icon }) => (
+                  <button
+                    key={id}
+                    type="button"
+                    onClick={() => {
+                      setPaymentMethod(id);
+                      setBillError(null);
+                    }}
+                    className={`flex flex-col items-center justify-center gap-1 rounded-xl border py-2.5 px-2 text-xs font-semibold cursor-pointer transition-colors ${
+                      paymentMethod === id
+                        ? 'border-emerald-500 bg-emerald-50 dark:bg-emerald-950/50 text-emerald-800 dark:text-emerald-300'
+                        : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-300'
+                    }`}
+                  >
+                    <Icon className="w-4 h-4" />
+                    <span>{label}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Cash Received & Change Calculator */}
+            {paymentMethod === 'cash' && (
+              <div className="space-y-2.5">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                    Cash Received from Customer ({store.currency})
+                  </label>
+                  <input
+                    type="number"
+                    min={0}
+                    step="any"
+                    inputMode="decimal"
+                    value={cashReceived}
+                    onChange={(e) => {
+                      setCashReceived(e.target.value);
+                      setBillError(null);
+                    }}
+                    className="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-3.5 py-2.5 text-base font-mono font-bold text-slate-900 dark:text-slate-100"
+                  />
+                </div>
+
+                <div className="flex flex-wrap gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setCashReceived(String(billCalculations.total))}
+                    className="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-2.5 py-1 text-[11px] font-semibold text-slate-700 dark:text-slate-200 cursor-pointer"
+                  >
+                    Exact ({billCalculations.total})
+                  </button>
+                  {[500, 1000, 2000, 5000]
+                    .filter((amt) => amt >= billCalculations.total)
+                    .map((amt) => (
+                      <button
+                        key={amt}
+                        type="button"
+                        onClick={() => setCashReceived(String(amt))}
+                        className="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-2.5 py-1 text-[11px] font-mono font-semibold text-slate-700 dark:text-slate-200 cursor-pointer"
+                      >
+                        {amt}
+                      </button>
+                    ))}
+                </div>
+
+                <div className="rounded-xl border border-emerald-200 dark:border-emerald-900/60 bg-emerald-50/70 dark:bg-emerald-950/30 px-3.5 py-2.5 flex items-center justify-between text-xs">
+                  <span className="font-semibold text-emerald-900 dark:text-emerald-300">
+                    Change / Return to Customer
+                  </span>
+                  <span className="text-base font-bold font-mono tabular-nums text-emerald-700 dark:text-emerald-400">
+                    {formatMoney(billCalculations.changeDue, store.currency)}
+                  </span>
+                </div>
+              </div>
+            )}
+
+            {billError && (
+              <div className="rounded-lg border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/40 px-3 py-2 text-xs text-red-700 dark:text-red-300">
+                {billError}
+              </div>
+            )}
+
+            <div className="flex items-center gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setBillModalOpen(false)}
+                className="rounded-xl border border-slate-200 dark:border-slate-700 px-4 py-3 text-xs font-semibold text-slate-700 dark:text-slate-300 cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={settlingBill}
+                onClick={() => void handleSettleTableBill()}
+                className="flex-1 inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 px-4 py-3 text-sm font-semibold text-white disabled:opacity-50 cursor-pointer"
+              >
+                <Check className="w-4 h-4" />
+                <span>
+                  {settlingBill
+                    ? 'Completing Bill...'
+                    : `Confirm Paid · ${formatMoney(billCalculations.total, store.currency)}`}
+                </span>
+              </button>
             </div>
           </div>
         </div>
