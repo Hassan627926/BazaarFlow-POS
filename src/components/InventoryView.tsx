@@ -53,8 +53,10 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
   const [sku, setSku] = useState('');
   const [barcode, setBarcode] = useState('');
   const [category, setCategory] = useState(isRetail ? 'Groceries' : 'Main Course');
-  const [costPrice, setCostPrice] = useState('0');
-  const [sellingPrice, setSellingPrice] = useState('0');
+  const [isAddingNewCategory, setIsAddingNewCategory] = useState(false);
+  const [lastUsedCategory, setLastUsedCategory] = useState('');
+  const [costPrice, setCostPrice] = useState('');
+  const [sellingPrice, setSellingPrice] = useState('');
   const [stock, setStock] = useState('0');
   const [minStock, setMinStock] = useState('5');
   const [unit, setUnit] = useState(isRetail ? 'pcs' : 'plate');
@@ -94,12 +96,31 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
     });
   }, [products, search, stockFilter, isRetail]);
 
+  const existingCategories = useMemo(() => {
+    const set = new Set<string>();
+    products.forEach((p) => {
+      const c = p.category.trim();
+      if (c) set.add(c);
+    });
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [products]);
+
   const openCreateModal = () => {
     setEditingProduct(null);
     setName('');
     setSku('');
     setBarcode(isRetail ? generateEAN13Barcode() : '');
-    setCategory(isRetail ? 'General' : 'Main Course');
+    if (existingCategories.length > 0) {
+      const preferred =
+        lastUsedCategory && existingCategories.includes(lastUsedCategory)
+          ? lastUsedCategory
+          : existingCategories[0];
+      setCategory(preferred);
+      setIsAddingNewCategory(false);
+    } else {
+      setCategory('');
+      setIsAddingNewCategory(true);
+    }
     setCostPrice('');
     setSellingPrice('');
     setStock('20');
@@ -116,7 +137,8 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
     setSku(product.sku);
     setBarcode(isRetail ? product.barcode : '');
     setCategory(product.category);
-    setCostPrice(String(product.costPrice));
+    setIsAddingNewCategory(!existingCategories.includes(product.category));
+    setCostPrice(product.costPrice > 0 ? String(product.costPrice) : '');
     setSellingPrice(String(product.sellingPrice));
     setStock(String(product.stock));
     setMinStock(String(product.minStock));
@@ -130,7 +152,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
     e.preventDefault();
     const cleanName = name.trim();
     const cleanCat = category.trim();
-    const parsedCost = Number(costPrice || 0);
+    const parsedCost = costPrice.trim() === '' ? 0 : Number(costPrice);
     const parsedSell = Number(sellingPrice || 0);
     const parsedStock = Number(stock || 0);
     const parsedMin = Number(minStock || 0);
@@ -205,6 +227,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
           updatedAt: serverTimestamp(),
         });
       }
+      setLastUsedCategory(cleanCat);
       setFormOpen(false);
     } catch (err) {
       handleFirestoreError(err, editingProduct ? OperationType.UPDATE : OperationType.CREATE, path);
@@ -450,7 +473,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                           </td>
                         )}
                         <td className="py-3 px-4 text-right font-mono text-xs tabular-nums text-slate-600 dark:text-slate-400">
-                          {formatMoney(p.costPrice, store.currency)}
+                          {p.costPrice > 0 ? formatMoney(p.costPrice, store.currency) : '—'}
                         </td>
                         <td className="py-3 px-4 text-right font-mono text-xs font-semibold tabular-nums text-slate-900 dark:text-slate-100">
                           {formatMoney(p.sellingPrice, store.currency)}
@@ -608,17 +631,57 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                 </div>
 
                 <div>
-                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
-                    Category
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    maxLength={BLUEPRINT_LIMITS.CATEGORY_MAX}
-                    value={category}
-                    onChange={(e) => setCategory(e.target.value)}
-                    className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm text-slate-900 dark:text-slate-100"
-                  />
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                      Category
+                    </label>
+                    {existingCategories.length > 0 && isAddingNewCategory && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsAddingNewCategory(false);
+                          setCategory(existingCategories[0]);
+                        }}
+                        className="text-[11px] font-medium brand-text hover:underline cursor-pointer"
+                      >
+                        Select existing
+                      </button>
+                    )}
+                  </div>
+
+                  {existingCategories.length > 0 && !isAddingNewCategory ? (
+                    <select
+                      required
+                      value={category}
+                      onChange={(e) => {
+                        if (e.target.value === '__new__') {
+                          setIsAddingNewCategory(true);
+                          setCategory('');
+                        } else {
+                          setCategory(e.target.value);
+                        }
+                      }}
+                      className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm text-slate-900 dark:text-slate-100"
+                    >
+                      {existingCategories.map((cat) => (
+                        <option key={cat} value={cat}>
+                          {cat}
+                        </option>
+                      ))}
+                      <option value="__new__">+ Add New Category...</option>
+                    </select>
+                  ) : (
+                    <input
+                      type="text"
+                      required
+                      autoFocus={isAddingNewCategory && existingCategories.length > 0}
+                      maxLength={BLUEPRINT_LIMITS.CATEGORY_MAX}
+                      value={category}
+                      onChange={(e) => setCategory(e.target.value)}
+                      placeholder={isRetail ? 'e.g. Groceries, Apparel' : 'e.g. BBQ, Burgers, Drinks'}
+                      className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm text-slate-900 dark:text-slate-100"
+                    />
+                  )}
                 </div>
 
                 <div>
@@ -672,15 +735,15 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
 
                 <div>
                   <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
-                    Cost Price ({store.currency})
+                    Cost Price ({store.currency}) <span className="text-slate-400 font-normal">· Optional</span>
                   </label>
                   <input
                     type="number"
-                    required
                     min="0"
                     step="any"
                     value={costPrice}
                     onChange={(e) => setCostPrice(e.target.value)}
+                    placeholder="Optional"
                     className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm font-mono tabular-nums text-slate-900 dark:text-slate-100"
                   />
                 </div>

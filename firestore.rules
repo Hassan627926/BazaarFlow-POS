@@ -14,7 +14,13 @@ service cloud.firestore {
     }
 
     function isVerifiedUser() {
-      return isSignedIn() && request.auth.token.email_verified == true;
+      return isSignedIn() &&
+        request.auth.token.email_verified == true &&
+        request.auth.token.email is string;
+    }
+
+    function authEmailLower() {
+      return request.auth.token.email.lower();
     }
 
     function isValidId(id) {
@@ -33,13 +39,45 @@ service cloud.firestore {
       return val is string && val.size() == 7 && val.matches('^#[0-9a-fA-F]{6}$');
     }
 
+    function storeExists(storeId) {
+      return exists(/databases/$(database)/documents/stores/$(storeId));
+    }
+
+    function storeOwnerId(storeId) {
+      return get(/databases/$(database)/documents/stores/$(storeId)).data.ownerId;
+    }
+
     function isStoreOwner(storeId) {
-      return exists(/databases/$(database)/documents/stores/$(storeId)) &&
-        get(/databases/$(database)/documents/stores/$(storeId)).data.ownerId == request.auth.uid;
+      return storeExists(storeId) && storeOwnerId(storeId) == request.auth.uid;
     }
 
     function isRetailStore(storeId) {
       return get(/databases/$(database)/documents/stores/$(storeId)).data.businessType == 'retail';
+    }
+
+    function isRestaurantStore(storeId) {
+      return get(/databases/$(database)/documents/stores/$(storeId)).data.businessType == 'restaurant';
+    }
+
+    // Master Gate: Synchronous Waiter RBAC verification backed by owner-controlled /waiterAccess grant
+    function isActiveWaiter(storeId) {
+      return isVerifiedUser() &&
+        exists(/databases/$(database)/documents/stores/$(storeId)/waiterMembers/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/stores/$(storeId)/waiterMembers/$(request.auth.uid)).data.active == true &&
+        exists(/databases/$(database)/documents/waiterAccess/$(get(/databases/$(database)/documents/stores/$(storeId)/waiterMembers/$(request.auth.uid)).data.accessId)) &&
+        get(/databases/$(database)/documents/waiterAccess/$(get(/databases/$(database)/documents/stores/$(storeId)/waiterMembers/$(request.auth.uid)).data.accessId)).data.storeId == storeId &&
+        get(/databases/$(database)/documents/waiterAccess/$(get(/databases/$(database)/documents/stores/$(storeId)/waiterMembers/$(request.auth.uid)).data.accessId)).data.active == true &&
+        get(/databases/$(database)/documents/waiterAccess/$(get(/databases/$(database)/documents/stores/$(storeId)/waiterMembers/$(request.auth.uid)).data.accessId)).data.waiterEmail == authEmailLower();
+    }
+
+    function hasMatchingActiveGrant(data, storeId) {
+      return isValidId(data.accessId) &&
+        exists(/databases/$(database)/documents/waiterAccess/$(data.accessId)) &&
+        get(/databases/$(database)/documents/waiterAccess/$(data.accessId)).data.storeId == storeId &&
+        get(/databases/$(database)/documents/waiterAccess/$(data.accessId)).data.ownerId == data.ownerId &&
+        get(/databases/$(database)/documents/waiterAccess/$(data.accessId)).data.employeeId == data.employeeId &&
+        get(/databases/$(database)/documents/waiterAccess/$(data.accessId)).data.waiterEmail == authEmailLower() &&
+        get(/databases/$(database)/documents/waiterAccess/$(data.accessId)).data.active == true;
     }
 
     // ── Validation Blueprints (Anti-Update-Gap) ─────────────────────────────
@@ -51,7 +89,7 @@ service cloud.firestore {
         ]) &&
         data.keys().hasOnly([
           'ownerId', 'name', 'businessType', 'logoDataUrl', 'primaryColor',
-          'accentColor', 'currency', 'taxRate', 'address', 'phone',
+          'accentColor', 'currency', 'taxRate', 'tableCount', 'address', 'phone',
           'receiptFooter', 'createdAt', 'updatedAt'
         ]) &&
         isValidId(data.ownerId) &&
@@ -63,6 +101,7 @@ service cloud.firestore {
         isHexColor(data.accentColor) &&
         data.currency is string && data.currency.size() >= 1 && data.currency.size() <= 10 &&
         data.taxRate is number && data.taxRate >= 0 && data.taxRate <= 50 &&
+        (!('tableCount' in data) || (data.tableCount is number && data.tableCount >= 1 && data.tableCount <= 60)) &&
         data.address is string && data.address.size() <= 200 &&
         data.phone is string && data.phone.size() <= 32 &&
         data.receiptFooter is string && data.receiptFooter.size() <= 180 &&
@@ -82,7 +121,6 @@ service cloud.firestore {
           'active', 'createdAt', 'updatedAt'
         ]) &&
         isValidId(data.ownerId) &&
-        data.ownerId == request.auth.uid &&
         isValidId(data.storeId) &&
         data.storeId == storeId &&
         data.name is string && data.name.size() >= 1 && data.name.size() <= 100 &&
@@ -111,7 +149,8 @@ service cloud.firestore {
           'ownerId', 'storeId', 'invoiceNumber', 'dateKey', 'items',
           'itemCount', 'subtotal', 'discount', 'taxRate', 'taxAmount',
           'total', 'totalCost', 'profit', 'paymentMethod', 'amountTendered',
-          'changeDue', 'orderType', 'tableNumber', 'customerName', 'status',
+          'changeDue', 'orderType', 'tableNumber', 'customerName',
+          'customerPhone', 'customerAddress', 'employeeId', 'employeeName', 'status',
           'createdAt', 'updatedAt'
         ]) &&
         isValidId(data.ownerId) &&
@@ -135,6 +174,10 @@ service cloud.firestore {
         data.orderType in ['retail', 'dine_in', 'takeaway', 'delivery'] &&
         data.tableNumber is string && data.tableNumber.size() <= 20 &&
         data.customerName is string && data.customerName.size() <= 80 &&
+        (!('customerPhone' in data) || (data.customerPhone is string && data.customerPhone.size() <= 32)) &&
+        (!('customerAddress' in data) || (data.customerAddress is string && data.customerAddress.size() <= 220)) &&
+        (!('employeeId' in data) || (data.employeeId is string && data.employeeId.size() <= 128)) &&
+        (!('employeeName' in data) || (data.employeeName is string && data.employeeName.size() <= 80)) &&
         data.status in ['completed', 'voided'] &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
@@ -150,7 +193,6 @@ service cloud.firestore {
           'previousStock', 'newStock', 'reason', 'note', 'createdAt'
         ]) &&
         isValidId(data.ownerId) &&
-        data.ownerId == request.auth.uid &&
         isValidId(data.storeId) &&
         data.storeId == storeId &&
         isValidId(data.productId) &&
@@ -163,11 +205,175 @@ service cloud.firestore {
         data.createdAt is timestamp;
     }
 
+    function isValidTableSession(data, storeId) {
+      return data.keys().hasAll([
+          'ownerId', 'storeId', 'tableNumber', 'status', 'items',
+          'itemCount', 'subtotal', 'totalCost', 'customerName',
+          'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'ownerId', 'storeId', 'tableNumber', 'status', 'items',
+          'itemCount', 'subtotal', 'totalCost', 'customerName',
+          'employeeId', 'employeeName', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.ownerId) &&
+        isValidId(data.storeId) &&
+        data.storeId == storeId &&
+        data.tableNumber is string && data.tableNumber.size() >= 1 && data.tableNumber.size() <= 20 &&
+        data.status == 'occupied' &&
+        data.items is list && data.items.size() >= 1 && data.items.size() <= 100 && data.items[0] is map &&
+        data.itemCount is number && data.itemCount >= 1 && data.itemCount <= 10000 &&
+        data.subtotal is number && data.subtotal >= 0 && data.subtotal <= 100000000 &&
+        data.totalCost is number && data.totalCost >= 0 && data.totalCost <= 100000000 &&
+        data.customerName is string && data.customerName.size() <= 80 &&
+        (!('employeeId' in data) || (data.employeeId is string && data.employeeId.size() <= 128)) &&
+        (!('employeeName' in data) || (data.employeeName is string && data.employeeName.size() <= 80)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidCustomer(data, storeId) {
+      return data.keys().hasAll([
+          'ownerId', 'storeId', 'name', 'phone', 'phoneDigits',
+          'address', 'orderCount', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'ownerId', 'storeId', 'name', 'phone', 'phoneDigits',
+          'address', 'orderCount', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.ownerId) &&
+        data.ownerId == request.auth.uid &&
+        isValidId(data.storeId) &&
+        data.storeId == storeId &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 80 &&
+        data.phone is string && data.phone.size() >= 1 && data.phone.size() <= 32 &&
+        data.phoneDigits is string && data.phoneDigits.size() >= 4 && data.phoneDigits.size() <= 24 && data.phoneDigits.matches('^[0-9]+$') &&
+        data.address is string && data.address.size() <= 220 &&
+        data.orderCount is number && data.orderCount >= 1 && data.orderCount <= 1000000 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidEmployee(data, storeId) {
+      return data.keys().hasAll([
+          'ownerId', 'storeId', 'name', 'role', 'phone', 'cnic',
+          'shift', 'notes', 'active', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'ownerId', 'storeId', 'name', 'role', 'phone', 'cnic',
+          'shift', 'notes', 'loginEmail', 'mobileAccess', 'active', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.ownerId) &&
+        data.ownerId == request.auth.uid &&
+        isValidId(data.storeId) &&
+        data.storeId == storeId &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 80 &&
+        data.role is string && data.role.size() >= 1 && data.role.size() <= 40 &&
+        data.phone is string && data.phone.size() <= 32 &&
+        data.cnic is string && data.cnic.size() <= 32 &&
+        data.shift is string && data.shift.size() <= 40 &&
+        data.notes is string && data.notes.size() <= 160 &&
+        (!('loginEmail' in data) || (data.loginEmail is string && data.loginEmail.size() <= 120)) &&
+        (!('mobileAccess' in data) || data.mobileAccess is bool) &&
+        data.active is bool &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidWaiterAccess(data) {
+      return data.keys().hasAll([
+          'ownerId', 'storeId', 'storeName', 'employeeId', 'employeeName',
+          'role', 'waiterEmail', 'active', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'ownerId', 'storeId', 'storeName', 'employeeId', 'employeeName',
+          'role', 'waiterEmail', 'active', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.ownerId) &&
+        data.ownerId == request.auth.uid &&
+        isValidId(data.storeId) &&
+        data.storeName is string && data.storeName.size() >= 1 && data.storeName.size() <= 80 &&
+        isValidId(data.employeeId) &&
+        data.employeeName is string && data.employeeName.size() >= 1 && data.employeeName.size() <= 80 &&
+        data.role is string && data.role.size() >= 1 && data.role.size() <= 40 &&
+        data.waiterEmail is string && data.waiterEmail.size() >= 3 && data.waiterEmail.size() <= 120 &&
+        data.active is bool &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidWaiterMember(data, storeId) {
+      return data.keys().hasAll([
+          'ownerId', 'storeId', 'accessId', 'employeeId', 'employeeName',
+          'waiterUid', 'waiterEmail', 'active', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'ownerId', 'storeId', 'accessId', 'employeeId', 'employeeName',
+          'waiterUid', 'waiterEmail', 'active', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.ownerId) &&
+        isValidId(data.storeId) &&
+        data.storeId == storeId &&
+        isValidId(data.accessId) &&
+        isValidId(data.employeeId) &&
+        data.employeeName is string && data.employeeName.size() >= 1 && data.employeeName.size() <= 80 &&
+        isValidId(data.waiterUid) &&
+        data.waiterUid == request.auth.uid &&
+        data.waiterEmail is string && data.waiterEmail.size() >= 3 && data.waiterEmail.size() <= 120 &&
+        data.waiterEmail == authEmailLower() &&
+        data.active == true &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    // ── /waiterAccess/{accessId} ────────────────────────────────────────────
+    // Owner manages mobile waiter grants; waiter can only read their own email grant
+    match /waiterAccess/{accessId} {
+      allow get: if isVerifiedUser() &&
+        isValidId(accessId) && (
+          existing().ownerId == request.auth.uid ||
+          existing().waiterEmail == authEmailLower()
+        );
+
+      allow list: if isVerifiedUser() && (
+        existing().ownerId == request.auth.uid ||
+        existing().waiterEmail == authEmailLower()
+      );
+
+      allow create: if isVerifiedUser() &&
+        isValidId(accessId) &&
+        isValidWaiterAccess(incoming()) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        isStoreOwner(incoming().storeId);
+
+      allow update: if isVerifiedUser() &&
+        isValidId(accessId) &&
+        isValidWaiterAccess(incoming()) &&
+        existing().ownerId == request.auth.uid &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().storeId == existing().storeId &&
+        incoming().employeeId == existing().employeeId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        isStoreOwner(existing().storeId) &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'storeName', 'employeeName', 'role', 'waiterEmail', 'active', 'updatedAt'
+        ]);
+
+      allow delete: if isVerifiedUser() &&
+        isValidId(accessId) &&
+        existing().ownerId == request.auth.uid &&
+        isStoreOwner(existing().storeId);
+    }
+
     // ── /stores/{storeId} ───────────────────────────────────────────────────
     match /stores/{storeId} {
       allow get: if isVerifiedUser() &&
-        isValidId(storeId) &&
-        existing().ownerId == request.auth.uid;
+        isValidId(storeId) && (
+          existing().ownerId == request.auth.uid ||
+          isActiveWaiter(storeId)
+        );
 
       allow list: if isVerifiedUser() &&
         existing().ownerId == request.auth.uid;
@@ -188,7 +394,7 @@ service cloud.firestore {
           // Action: Update Brand & Store Settings
           incoming().diff(existing()).affectedKeys().hasOnly([
             'name', 'businessType', 'logoDataUrl', 'primaryColor', 'accentColor',
-            'currency', 'taxRate', 'address', 'phone', 'receiptFooter', 'updatedAt'
+            'currency', 'taxRate', 'tableCount', 'address', 'phone', 'receiptFooter', 'updatedAt'
           ])
         );
 
@@ -196,22 +402,71 @@ service cloud.firestore {
         isValidId(storeId) &&
         existing().ownerId == request.auth.uid;
 
+      // ── /stores/{storeId}/waiterMembers/{memberUid} ───────────────────────
+      match /waiterMembers/{memberUid} {
+        allow get: if isVerifiedUser() &&
+          isValidId(storeId) &&
+          isValidId(memberUid) && (
+            memberUid == request.auth.uid ||
+            isStoreOwner(storeId)
+          );
+
+        allow list: if isVerifiedUser() &&
+          existing().ownerId == request.auth.uid;
+
+        allow create: if isVerifiedUser() &&
+          isValidId(storeId) &&
+          isValidId(memberUid) &&
+          memberUid == request.auth.uid &&
+          isValidWaiterMember(incoming(), storeId) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          storeExists(storeId) &&
+          incoming().ownerId == storeOwnerId(storeId) &&
+          hasMatchingActiveGrant(incoming(), storeId);
+
+        allow update: if isVerifiedUser() &&
+          isValidId(storeId) &&
+          isValidId(memberUid) &&
+          memberUid == request.auth.uid &&
+          isValidWaiterMember(incoming(), storeId) &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().storeId == existing().storeId &&
+          incoming().waiterUid == existing().waiterUid &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          hasMatchingActiveGrant(incoming(), storeId) &&
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'accessId', 'employeeId', 'employeeName', 'waiterEmail', 'active', 'updatedAt'
+          ]);
+
+        allow delete: if isVerifiedUser() &&
+          isValidId(storeId) &&
+          isValidId(memberUid) && (
+            memberUid == request.auth.uid ||
+            isStoreOwner(storeId)
+          );
+      }
+
       // ── /stores/{storeId}/products/{productId} ────────────────────────────
       match /products/{productId} {
         allow get: if isVerifiedUser() &&
           isValidId(storeId) &&
-          isValidId(productId) &&
-          existing().ownerId == request.auth.uid &&
-          isStoreOwner(storeId);
+          isValidId(productId) && (
+            (existing().ownerId == request.auth.uid && isStoreOwner(storeId)) ||
+            (existing().storeId == storeId && isActiveWaiter(storeId))
+          );
 
-        allow list: if isVerifiedUser() &&
-          existing().ownerId == request.auth.uid &&
-          existing().storeId == storeId;
+        allow list: if isVerifiedUser() && (
+          existing().ownerId == request.auth.uid ||
+          (existing().storeId == storeId && isActiveWaiter(storeId))
+        );
 
         allow create: if isVerifiedUser() &&
           isValidId(storeId) &&
           isValidId(productId) &&
           isValidProduct(incoming(), storeId) &&
+          incoming().ownerId == request.auth.uid &&
           incoming().createdAt == request.time &&
           incoming().updatedAt == request.time &&
           isStoreOwner(storeId) &&
@@ -221,22 +476,30 @@ service cloud.firestore {
           isValidId(storeId) &&
           isValidId(productId) &&
           isValidProduct(incoming(), storeId) &&
-          existing().ownerId == request.auth.uid &&
           incoming().ownerId == existing().ownerId &&
           incoming().storeId == existing().storeId &&
           incoming().createdAt == existing().createdAt &&
-          incoming().updatedAt == request.time &&
-          isStoreOwner(storeId) && (
-            // Action: Edit Product Details (barcode strictly empty for restaurants)
+          incoming().updatedAt == request.time && (
+            // Tier 1 (Owner): Full product edits or stock updates
             (
-              (isRetailStore(storeId) || incoming().barcode == '') &&
-              incoming().diff(existing()).affectedKeys().hasOnly([
-                'name', 'sku', 'barcode', 'category', 'costPrice', 'sellingPrice',
-                'stock', 'minStock', 'unit', 'active', 'updatedAt'
-              ])
+              existing().ownerId == request.auth.uid &&
+              isStoreOwner(storeId) && (
+                (
+                  (isRetailStore(storeId) || incoming().barcode == '') &&
+                  incoming().diff(existing()).affectedKeys().hasOnly([
+                    'name', 'sku', 'barcode', 'category', 'costPrice', 'sellingPrice',
+                    'stock', 'minStock', 'unit', 'active', 'updatedAt'
+                  ])
+                ) ||
+                incoming().diff(existing()).affectedKeys().hasOnly(['stock', 'updatedAt'])
+              )
             ) ||
-            // Action: Adjust Stock Only (Sale / Restock / Void Restore)
-            incoming().diff(existing()).affectedKeys().hasOnly(['stock', 'updatedAt'])
+            // Tier 2 (Active Waiter): Stock adjustment ONLY when placing/editing table orders
+            (
+              isActiveWaiter(storeId) &&
+              isRestaurantStore(storeId) &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['stock', 'updatedAt'])
+            )
           );
 
         allow delete: if isVerifiedUser() &&
@@ -247,6 +510,7 @@ service cloud.firestore {
       }
 
       // ── /stores/{storeId}/sales/{saleId} ──────────────────────────────────
+      // Strictly owner-only: waiters cannot settle bills, void sales, or read revenue/profit
       match /sales/{saleId} {
         allow get: if isVerifiedUser() &&
           isValidId(storeId) &&
@@ -255,8 +519,7 @@ service cloud.firestore {
           isStoreOwner(storeId);
 
         allow list: if isVerifiedUser() &&
-          existing().ownerId == request.auth.uid &&
-          existing().storeId == storeId;
+          existing().ownerId == request.auth.uid;
 
         allow create: if isVerifiedUser() &&
           isValidId(storeId) &&
@@ -294,17 +557,166 @@ service cloud.firestore {
           isStoreOwner(storeId);
 
         allow list: if isVerifiedUser() &&
-          existing().ownerId == request.auth.uid &&
-          existing().storeId == storeId;
+          existing().ownerId == request.auth.uid;
 
         allow create: if isVerifiedUser() &&
           isValidId(storeId) &&
           isValidId(logId) &&
           isValidStockLog(incoming(), storeId) &&
-          incoming().createdAt == request.time &&
-          isStoreOwner(storeId);
+          incoming().createdAt == request.time && (
+            (incoming().ownerId == request.auth.uid && isStoreOwner(storeId)) ||
+            (
+              isActiveWaiter(storeId) &&
+              isRestaurantStore(storeId) &&
+              incoming().ownerId == storeOwnerId(storeId) &&
+              incoming().reason in ['sale', 'adjustment']
+            )
+          );
 
         allow update, delete: if false;
+      }
+
+      // ── /stores/{storeId}/tables/{tableId} ────────────────────────────────
+      match /tables/{tableId} {
+        allow get: if isVerifiedUser() &&
+          isValidId(storeId) &&
+          isValidId(tableId) && (
+            (existing().ownerId == request.auth.uid && isStoreOwner(storeId)) ||
+            (existing().storeId == storeId && isActiveWaiter(storeId))
+          );
+
+        allow list: if isVerifiedUser() && (
+          existing().ownerId == request.auth.uid ||
+          (existing().storeId == storeId && isActiveWaiter(storeId))
+        );
+
+        allow create: if isVerifiedUser() &&
+          isValidId(storeId) &&
+          isValidId(tableId) &&
+          isValidTableSession(incoming(), storeId) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time && (
+            (incoming().ownerId == request.auth.uid && isStoreOwner(storeId)) ||
+            (
+              isActiveWaiter(storeId) &&
+              isRestaurantStore(storeId) &&
+              incoming().ownerId == storeOwnerId(storeId)
+            )
+          );
+
+        allow update: if isVerifiedUser() &&
+          isValidId(storeId) &&
+          isValidId(tableId) &&
+          isValidTableSession(incoming(), storeId) &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().storeId == existing().storeId &&
+          incoming().tableNumber == existing().tableNumber &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time && (
+            (existing().ownerId == request.auth.uid && isStoreOwner(storeId)) ||
+            (isActiveWaiter(storeId) && isRestaurantStore(storeId))
+          ) && (
+            // Action: Update Occupied Table Items / Assigned Staff
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'items', 'itemCount', 'subtotal', 'totalCost', 'customerName',
+              'employeeId', 'employeeName', 'updatedAt'
+            ])
+          );
+
+        allow delete: if isVerifiedUser() &&
+          isValidId(storeId) &&
+          isValidId(tableId) && (
+            (existing().ownerId == request.auth.uid && isStoreOwner(storeId)) ||
+            (isActiveWaiter(storeId) && isRestaurantStore(storeId))
+          );
+      }
+
+      // ── /stores/{storeId}/customers/{customerId} ──────────────────────────
+      // PII (phone, address) strictly owner-isolated (no waiter reads)
+      match /customers/{customerId} {
+        allow get: if isVerifiedUser() &&
+          isValidId(storeId) &&
+          isValidId(customerId) &&
+          existing().ownerId == request.auth.uid &&
+          isStoreOwner(storeId);
+
+        allow list: if isVerifiedUser() &&
+          existing().ownerId == request.auth.uid;
+
+        allow create: if isVerifiedUser() &&
+          isValidId(storeId) &&
+          isValidId(customerId) &&
+          isValidCustomer(incoming(), storeId) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          isStoreOwner(storeId);
+
+        allow update: if isVerifiedUser() &&
+          isValidId(storeId) &&
+          isValidId(customerId) &&
+          isValidCustomer(incoming(), storeId) &&
+          existing().ownerId == request.auth.uid &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().storeId == existing().storeId &&
+          incoming().phoneDigits == existing().phoneDigits &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          isStoreOwner(storeId) && (
+            // Action: Update Customer Name / Phone Formatting / Delivery Address / Order Count
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'name', 'phone', 'address', 'orderCount', 'updatedAt'
+            ])
+          );
+
+        allow delete: if isVerifiedUser() &&
+          isValidId(storeId) &&
+          isValidId(customerId) &&
+          existing().ownerId == request.auth.uid &&
+          isStoreOwner(storeId);
+      }
+
+      // ── /stores/{storeId}/employees/{employeeId} ──────────────────────────
+      // Staff PII (phone, cnic, notes) strictly owner-isolated (no waiter reads)
+      match /employees/{employeeId} {
+        allow get: if isVerifiedUser() &&
+          isValidId(storeId) &&
+          isValidId(employeeId) &&
+          existing().ownerId == request.auth.uid &&
+          isStoreOwner(storeId);
+
+        allow list: if isVerifiedUser() &&
+          existing().ownerId == request.auth.uid;
+
+        allow create: if isVerifiedUser() &&
+          isValidId(storeId) &&
+          isValidId(employeeId) &&
+          isValidEmployee(incoming(), storeId) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          isStoreOwner(storeId);
+
+        allow update: if isVerifiedUser() &&
+          isValidId(storeId) &&
+          isValidId(employeeId) &&
+          isValidEmployee(incoming(), storeId) &&
+          existing().ownerId == request.auth.uid &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().storeId == existing().storeId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          isStoreOwner(storeId) && (
+            // Action: Edit Employee Profile, Mobile Access, or Active Status
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'name', 'role', 'phone', 'cnic', 'shift', 'notes',
+              'loginEmail', 'mobileAccess', 'active', 'updatedAt'
+            ])
+          );
+
+        allow delete: if isVerifiedUser() &&
+          isValidId(storeId) &&
+          isValidId(employeeId) &&
+          existing().ownerId == request.auth.uid &&
+          isStoreOwner(storeId);
       }
     }
   }

@@ -1,9 +1,10 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { onAuthStateChanged, signOut, type User } from 'firebase/auth';
+import { getRedirectResult, onAuthStateChanged, signOut, type User } from 'firebase/auth';
 import {
   BarChart3,
   Barcode,
   ChevronDown,
+  KeyRound,
   LogOut,
   Menu,
   Moon,
@@ -12,29 +13,37 @@ import {
   Receipt,
   Settings,
   ShoppingCart,
+  Smartphone,
   Store,
   Sun,
+  Users,
   UtensilsCrossed,
   X,
 } from 'lucide-react';
 import {
   collection,
   doc,
+  getDoc,
   onSnapshot,
   query,
   serverTimestamp,
   setDoc,
+  updateDoc,
   where,
   writeBatch,
 } from 'firebase/firestore';
 import { auth, db, handleFirestoreError, OperationType } from './firebase';
 import {
   type AppTab,
+  type Customer,
+  type Employee,
   type PrintJob,
   type Product,
   type Sale,
   type StockLog,
   type StoreConfig,
+  type TableSession,
+  type WaiterAccess,
 } from './types';
 import {
   generateSafeId,
@@ -45,14 +54,17 @@ import { AnalyticsView } from './components/AnalyticsView';
 import { AuthScreen } from './components/AuthScreen';
 import { BarcodeStudioView } from './components/BarcodeStudioView';
 import { BillingView } from './components/BillingView';
+import { EmployeesView } from './components/EmployeesView';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { InventoryView } from './components/InventoryView';
 import { OfflineIndicator } from './components/OfflineIndicator';
+import { PasswordSetupModal } from './components/PasswordSetupModal';
 import { PrintModal } from './components/PrintModal';
 import { PWAInstallButton } from './components/PWAInstallButton';
 import { SalesHistoryView } from './components/SalesHistoryView';
 import { SettingsView } from './components/SettingsView';
 import { StoreOnboardingModal, type NewStorePayload } from './components/StoreOnboardingModal';
+import { WaiterOrderView } from './components/WaiterOrderView';
 
 function POSWorkspace() {
   const [user, setUser] = useState<User | null>(null);
@@ -67,10 +79,73 @@ function POSWorkspace() {
   const [products, setProducts] = useState<Product[]>([]);
   const [sales, setSales] = useState<Sale[]>([]);
   const [stockLogs, setStockLogs] = useState<StockLog[]>([]);
+  const [tableSessions, setTableSessions] = useState<TableSession[]>([]);
+  const [customers, setCustomers] = useState<Customer[]>([]);
+  const [employees, setEmployees] = useState<Employee[]>([]);
 
   const [activeTab, setActiveTab] = useState<AppTab>('billing');
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [printJob, setPrintJob] = useState<PrintJob | null>(null);
+  const [boundaryError, setBoundaryError] = useState<Error | null>(null);
+
+  // Waiter Mobile App access state
+  const [preferWaiterMode, setPreferWaiterMode] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    return new URLSearchParams(window.location.search).get('mode') === 'waiter';
+  });
+  const [waiterGrants, setWaiterGrants] = useState<WaiterAccess[]>([]);
+  const [waiterGrantsLoaded, setWaiterGrantsLoaded] = useState(false);
+  const [waiterMemberReady, setWaiterMemberReady] = useState(false);
+  const [waiterSyncError, setWaiterSyncError] = useState<string | null>(null);
+  const [waiterStore, setWaiterStore] = useState<StoreConfig | null>(null);
+  const [waiterProducts, setWaiterProducts] = useState<Product[]>([]);
+  const [waiterTables, setWaiterTables] = useState<TableSession[]>([]);
+
+  // Post-sign-in Create/Change Password modal state
+  const [passwordModalOpen, setPasswordModalOpen] = useState(false);
+  const [passwordLinkedTick, setPasswordLinkedTick] = useState(0);
+
+  const hasPasswordProvider = useMemo(() => {
+    void passwordLinkedTick;
+    const activeUser = auth.currentUser ?? user;
+    if (!activeUser) return false;
+    return activeUser.providerData.some((p) => p.providerId === 'password');
+  }, [user, passwordLinkedTick]);
+
+  const onboardingRequired = Boolean(
+    createStoreOpen ||
+      (storesLoaded &&
+        waiterGrantsLoaded &&
+        stores.length === 0 &&
+        !waiterGrants.some((g) => g.active) &&
+        !preferWaiterMode)
+  );
+
+  // Prompt user right after sign-in to create a password if they haven't linked Email/Password yet
+  useEffect(() => {
+    if (!authReady || !user || !user.email || !storesLoaded || !waiterGrantsLoaded) return;
+    if (hasPasswordProvider || onboardingRequired) return;
+    const dismissKey = `bazaarflow_pwd_prompt_dismissed_${user.uid}`;
+    if (typeof window !== 'undefined' && window.sessionStorage.getItem(dismissKey) === '1') {
+      return;
+    }
+    setPasswordModalOpen(true);
+  }, [authReady, user, storesLoaded, waiterGrantsLoaded, hasPasswordProvider, onboardingRequired]);
+
+  const handleClosePasswordModal = () => {
+    if (user && typeof window !== 'undefined') {
+      window.sessionStorage.setItem(`bazaarflow_pwd_prompt_dismissed_${user.uid}`, '1');
+    }
+    setPasswordModalOpen(false);
+  };
+
+  const reportSnapshotError = (err: unknown, op: OperationType, path: string) => {
+    try {
+      handleFirestoreError(err, op, path);
+    } catch (wrapped) {
+      setBoundaryError(wrapped instanceof Error ? wrapped : new Error(String(wrapped)));
+    }
+  };
 
   const [darkMode, setDarkMode] = useState<boolean>(() => {
     if (typeof window === 'undefined') return false;
@@ -89,8 +164,18 @@ function POSWorkspace() {
     }
   }, [darkMode]);
 
-  // Listen to Firebase Auth
+  // Listen to Firebase Auth (and recover any pending redirect sign-in)
   useEffect(() => {
+    void getRedirectResult(auth)
+      .then((res) => {
+        if (res?.user) {
+          setUser(res.user);
+        }
+      })
+      .catch(() => {
+        // Handled via normal auth state listener
+      });
+
     const unsub = onAuthStateChanged(auth, (nextUser) => {
       setUser(nextUser);
       setAuthReady(true);
@@ -101,6 +186,16 @@ function POSWorkspace() {
         setProducts([]);
         setSales([]);
         setStockLogs([]);
+        setTableSessions([]);
+        setCustomers([]);
+        setEmployees([]);
+        setWaiterGrants([]);
+        setWaiterGrantsLoaded(false);
+        setWaiterMemberReady(false);
+        setWaiterSyncError(null);
+        setWaiterStore(null);
+        setWaiterProducts([]);
+        setWaiterTables([]);
       }
     });
     return () => unsub();
@@ -129,11 +224,191 @@ function POSWorkspace() {
         });
       },
       (err) => {
-        handleFirestoreError(err, OperationType.LIST, 'stores');
+        reportSnapshotError(err, OperationType.LIST, 'stores');
       }
     );
     return () => unsub();
   }, [authReady, user]);
+
+  // Subscribe to any Waiter Mobile Access grants assigned to this signed-in Google email
+  useEffect(() => {
+    if (!authReady || !user) return;
+    const emailLower = user.email?.trim().toLowerCase() ?? '';
+    if (!emailLower) {
+      setWaiterGrants([]);
+      setWaiterGrantsLoaded(true);
+      return;
+    }
+
+    const grantsQuery = query(
+      collection(db, 'waiterAccess'),
+      where('waiterEmail', '==', emailLower)
+    );
+    const unsub = onSnapshot(
+      grantsQuery,
+      (snap) => {
+        const list: WaiterAccess[] = snap.docs
+          .map((d) => ({
+            id: d.id,
+            ...(d.data() as Omit<WaiterAccess, 'id'>),
+          }))
+          .filter((g) => g.active);
+        setWaiterGrants(list);
+        setWaiterGrantsLoaded(true);
+      },
+      () => {
+        setWaiterGrants([]);
+        setWaiterGrantsLoaded(true);
+      }
+    );
+    return () => unsub();
+  }, [authReady, user]);
+
+  const activeWaiterGrant = useMemo(
+    () => waiterGrants.find((g) => g.active) ?? null,
+    [waiterGrants]
+  );
+
+  const isStandaloneWaiterMode = useMemo(() => {
+    if (!activeWaiterGrant) return false;
+    if (preferWaiterMode) return true;
+    return storesLoaded && stores.length === 0;
+  }, [activeWaiterGrant, preferWaiterMode, storesLoaded, stores.length]);
+
+  // Bind /stores/{storeId}/waiterMembers/{user.uid} when entering standalone Waiter Mobile App
+  useEffect(() => {
+    if (!isStandaloneWaiterMode || !user || !user.email || !activeWaiterGrant) {
+      setWaiterMemberReady(false);
+      setWaiterSyncError(null);
+      return;
+    }
+
+    let cancelled = false;
+    setWaiterMemberReady(false);
+    setWaiterSyncError(null);
+
+    const bindMember = async () => {
+      const storeId = activeWaiterGrant.storeId;
+      const memberRef = doc(db, 'stores', storeId, 'waiterMembers', user.uid);
+      const emailLower = user.email!.trim().toLowerCase();
+      try {
+        const snap = await getDoc(memberRef);
+        if (snap.exists()) {
+          await updateDoc(memberRef, {
+            accessId: activeWaiterGrant.id,
+            employeeId: activeWaiterGrant.employeeId,
+            employeeName: activeWaiterGrant.employeeName,
+            waiterEmail: emailLower,
+            active: true,
+            updatedAt: serverTimestamp(),
+          });
+        } else {
+          await setDoc(memberRef, {
+            ownerId: activeWaiterGrant.ownerId,
+            storeId,
+            accessId: activeWaiterGrant.id,
+            employeeId: activeWaiterGrant.employeeId,
+            employeeName: activeWaiterGrant.employeeName,
+            waiterUid: user.uid,
+            waiterEmail: emailLower,
+            active: true,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+        }
+        if (!cancelled) {
+          setWaiterMemberReady(true);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setWaiterSyncError(
+            err instanceof Error ? err.message : 'Unable to activate waiter mobile session.'
+          );
+        }
+      }
+    };
+
+    void bindMember();
+    return () => {
+      cancelled = true;
+    };
+  }, [isStandaloneWaiterMode, user, activeWaiterGrant]);
+
+  // Subscribe to store, menu products, and live tables in standalone Waiter Mobile Mode
+  useEffect(() => {
+    if (!isStandaloneWaiterMode || !waiterMemberReady || !activeWaiterGrant) {
+      setWaiterStore(null);
+      setWaiterProducts([]);
+      setWaiterTables([]);
+      return;
+    }
+
+    const storeId = activeWaiterGrant.storeId;
+    const productsPath = `stores/${storeId}/products`;
+    const tablesPath = `stores/${storeId}/tables`;
+
+    const unsubStore = onSnapshot(
+      doc(db, 'stores', storeId),
+      (snap) => {
+        if (snap.exists()) {
+          const cfg: StoreConfig = {
+            id: snap.id,
+            ...(snap.data() as Omit<StoreConfig, 'id'>),
+          };
+          setWaiterStore(cfg);
+          document.documentElement.style.setProperty('--brand-primary', cfg.primaryColor);
+          document.documentElement.style.setProperty('--brand-accent', cfg.accentColor);
+        } else {
+          setWaiterStore(null);
+        }
+      },
+      (err) => {
+        setWaiterSyncError(
+          err instanceof Error ? err.message : 'Access to restaurant workspace was revoked.'
+        );
+      }
+    );
+
+    const unsubProducts = onSnapshot(
+      query(collection(db, productsPath), where('storeId', '==', storeId)),
+      (snap) => {
+        const list: Product[] = snap.docs.map((d) => ({
+          id: d.id,
+          ...(d.data() as Omit<Product, 'id'>),
+        }));
+        list.sort((a, b) => a.name.localeCompare(b.name));
+        setWaiterProducts(list);
+      },
+      (err) => {
+        setWaiterSyncError(
+          err instanceof Error ? err.message : 'Unable to load restaurant menu.'
+        );
+      }
+    );
+
+    const unsubTables = onSnapshot(
+      query(collection(db, tablesPath), where('storeId', '==', storeId)),
+      (snap) => {
+        const list: TableSession[] = snap.docs.map((d) => ({
+          id: d.id,
+          ...(d.data() as Omit<TableSession, 'id'>),
+        }));
+        list.sort((a, b) => Number(a.tableNumber) - Number(b.tableNumber));
+        setWaiterTables(list);
+      },
+      (err) => {
+        setWaiterSyncError(
+          err instanceof Error ? err.message : 'Unable to load live tables.'
+        );
+      }
+    );
+
+    return () => {
+      unsubStore();
+      unsubProducts();
+      unsubTables();
+    };
+  }, [isStandaloneWaiterMode, waiterMemberReady, activeWaiterGrant]);
 
   const activeStore = useMemo(
     () => stores.find((s) => s.id === activeStoreId) ?? null,
@@ -142,29 +417,37 @@ function POSWorkspace() {
 
   // Persist selected store and apply dynamic Brand CSS custom properties
   useEffect(() => {
-    if (!activeStore) return;
+    if (!activeStore || isStandaloneWaiterMode) return;
     window.localStorage.setItem('bazaarflow_active_store', activeStore.id);
     document.documentElement.style.setProperty('--brand-primary', activeStore.primaryColor);
     document.documentElement.style.setProperty('--brand-accent', activeStore.accentColor);
 
-    // Ensure Restaurant stores never stay on the Retail-only Barcode tab
+    // Ensure Restaurant stores never stay on Retail-only Barcode tab, and Retail stores never stay on Waiter tab
     if (activeStore.businessType === 'restaurant' && activeTab === 'barcodes') {
       setActiveTab('billing');
+    } else if (activeStore.businessType === 'retail' && activeTab === 'waiter') {
+      setActiveTab('billing');
     }
-  }, [activeStore, activeTab]);
+  }, [activeStore, activeTab, isStandaloneWaiterMode]);
 
-  // Subscribe to active store's products, sales, and stockLogs
+  // Subscribe to active store's products, sales, stockLogs, tables, customers, and employees
   useEffect(() => {
-    if (!user || !activeStoreId) {
+    if (!user || !activeStoreId || isStandaloneWaiterMode) {
       setProducts([]);
       setSales([]);
       setStockLogs([]);
+      setTableSessions([]);
+      setCustomers([]);
+      setEmployees([]);
       return;
     }
 
     const productsPath = `stores/${activeStoreId}/products`;
     const salesPath = `stores/${activeStoreId}/sales`;
     const logsPath = `stores/${activeStoreId}/stockLogs`;
+    const tablesPath = `stores/${activeStoreId}/tables`;
+    const customersPath = `stores/${activeStoreId}/customers`;
+    const employeesPath = `stores/${activeStoreId}/employees`;
 
     const unsubProducts = onSnapshot(
       query(collection(db, productsPath), where('ownerId', '==', user.uid)),
@@ -176,7 +459,7 @@ function POSWorkspace() {
         list.sort((a, b) => a.name.localeCompare(b.name));
         setProducts(list);
       },
-      (err) => handleFirestoreError(err, OperationType.LIST, productsPath)
+      (err) => reportSnapshotError(err, OperationType.LIST, productsPath)
     );
 
     const unsubSales = onSnapshot(
@@ -193,7 +476,7 @@ function POSWorkspace() {
         });
         setSales(list);
       },
-      (err) => handleFirestoreError(err, OperationType.LIST, salesPath)
+      (err) => reportSnapshotError(err, OperationType.LIST, salesPath)
     );
 
     const unsubLogs = onSnapshot(
@@ -210,15 +493,56 @@ function POSWorkspace() {
         });
         setStockLogs(list);
       },
-      (err) => handleFirestoreError(err, OperationType.LIST, logsPath)
+      (err) => reportSnapshotError(err, OperationType.LIST, logsPath)
+    );
+
+    const unsubTables = onSnapshot(
+      query(collection(db, tablesPath), where('ownerId', '==', user.uid)),
+      (snap) => {
+        const list: TableSession[] = snap.docs.map((d) => ({
+          id: d.id,
+          ...(d.data() as Omit<TableSession, 'id'>),
+        }));
+        list.sort((a, b) => Number(a.tableNumber) - Number(b.tableNumber));
+        setTableSessions(list);
+      },
+      (err) => reportSnapshotError(err, OperationType.LIST, tablesPath)
+    );
+
+    const unsubCustomers = onSnapshot(
+      query(collection(db, customersPath), where('ownerId', '==', user.uid)),
+      (snap) => {
+        const list: Customer[] = snap.docs.map((d) => ({
+          id: d.id,
+          ...(d.data() as Omit<Customer, 'id'>),
+        }));
+        setCustomers(list);
+      },
+      (err) => reportSnapshotError(err, OperationType.LIST, customersPath)
+    );
+
+    const unsubEmployees = onSnapshot(
+      query(collection(db, employeesPath), where('ownerId', '==', user.uid)),
+      (snap) => {
+        const list: Employee[] = snap.docs.map((d) => ({
+          id: d.id,
+          ...(d.data() as Omit<Employee, 'id'>),
+        }));
+        list.sort((a, b) => a.name.localeCompare(b.name));
+        setEmployees(list);
+      },
+      (err) => reportSnapshotError(err, OperationType.LIST, employeesPath)
     );
 
     return () => {
       unsubProducts();
       unsubSales();
       unsubLogs();
+      unsubTables();
+      unsubCustomers();
+      unsubEmployees();
     };
-  }, [user, activeStoreId]);
+  }, [user, activeStoreId, isStandaloneWaiterMode]);
 
   const handleCreateStore = async (payload: NewStorePayload) => {
     if (!user) return;
@@ -278,6 +602,10 @@ function POSWorkspace() {
     }
   };
 
+  if (boundaryError) {
+    throw boundaryError;
+  }
+
   if (!authReady) {
     return (
       <div className="min-h-screen bg-slate-50 dark:bg-slate-950 flex items-center justify-center">
@@ -289,9 +617,144 @@ function POSWorkspace() {
   if (!user) {
     return (
       <>
-        <AuthScreen />
+        <AuthScreen onSignedIn={(signedInUser) => setUser(signedInUser)} />
         <OfflineIndicator />
       </>
+    );
+  }
+
+  // Wait for both stores and waiter grants before routing so waiters never flash the Owner onboarding modal
+  if (!storesLoaded || !waiterGrantsLoaded) {
+    return (
+      <div className="min-h-screen bg-slate-50 dark:bg-slate-950 flex items-center justify-center">
+        <div className="text-sm text-slate-500 dark:text-slate-400">
+          Loading BazaarFlow POS...
+        </div>
+      </div>
+    );
+  }
+
+  // Standalone Waiter Mobile App mode
+  if (isStandaloneWaiterMode && activeWaiterGrant) {
+    if (waiterSyncError) {
+      return (
+        <div className="min-h-screen bg-slate-50 dark:bg-slate-950 flex items-center justify-center p-4">
+          <div className="max-w-md w-full rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-6 space-y-4 text-center">
+            <Smartphone className="w-8 h-8 mx-auto text-red-500" />
+            <h2 className="text-lg font-bold font-display text-slate-900 dark:text-slate-100">
+              Waiter Mobile Session Paused
+            </h2>
+            <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
+              {waiterSyncError}
+            </p>
+            <div className="flex flex-col sm:flex-row gap-2 justify-center pt-1">
+              {stores.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setPreferWaiterMode(false)}
+                  className="rounded-lg border border-slate-200 dark:border-slate-700 px-4 py-2 text-xs font-semibold text-slate-700 dark:text-slate-200 cursor-pointer"
+                >
+                  Switch to Owner POS
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => void signOut(auth)}
+                className="rounded-lg bg-slate-900 dark:bg-slate-100 px-4 py-2 text-xs font-semibold text-white dark:text-slate-900 cursor-pointer"
+              >
+                Sign Out
+              </button>
+            </div>
+          </div>
+          <OfflineIndicator />
+        </div>
+      );
+    }
+
+    if (!waiterMemberReady || !waiterStore) {
+      return (
+        <div className="min-h-screen bg-slate-50 dark:bg-slate-950 flex items-center justify-center p-4">
+          <div className="text-center space-y-2">
+            <div className="text-sm font-semibold text-slate-800 dark:text-slate-200">
+              Connecting to {activeWaiterGrant.storeName}...
+            </div>
+            <div className="text-xs text-slate-500 dark:text-slate-400">
+              Loading live tables & menu for {activeWaiterGrant.employeeName}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <>
+        <WaiterOrderView
+          standalone
+          store={waiterStore}
+          products={waiterProducts}
+          tableSessions={waiterTables}
+          waiterGrant={activeWaiterGrant}
+          darkMode={darkMode}
+          onToggleDarkMode={() => setDarkMode((v) => !v)}
+          onSignOut={() => void signOut(auth)}
+          onSwitchToOwner={stores.length > 0 ? () => setPreferWaiterMode(false) : undefined}
+          hasPassword={hasPasswordProvider}
+          onOpenPasswordSetup={() => setPasswordModalOpen(true)}
+          onPrintJob={setPrintJob}
+        />
+        <PasswordSetupModal
+          user={user}
+          isOpen={passwordModalOpen}
+          hasPasswordProvider={hasPasswordProvider}
+          onClose={handleClosePasswordModal}
+          onPasswordSaved={() => setPasswordLinkedTick((t) => t + 1)}
+        />
+        <PrintModal job={printJob} store={waiterStore} onClose={() => setPrintJob(null)} />
+        <OfflineIndicator />
+      </>
+    );
+  }
+
+  // Opened via ?mode=waiter with a Google account that does not have active Waiter Access yet
+  if (preferWaiterMode && !activeWaiterGrant && stores.length === 0) {
+    return (
+      <div className="min-h-screen bg-slate-50 dark:bg-slate-950 flex items-center justify-center p-4">
+        <div className="max-w-md w-full rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-6 sm:p-7 space-y-4 text-center">
+          <div className="w-11 h-11 rounded-xl bg-amber-100 dark:bg-amber-950/60 text-amber-700 dark:text-amber-400 flex items-center justify-center mx-auto">
+            <Smartphone className="w-5 h-5" />
+          </div>
+          <h2 className="text-lg font-bold font-display text-slate-900 dark:text-slate-100">
+            No Active Waiter Access Found
+          </h2>
+          <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
+            You signed in as{' '}
+            <span className="font-mono font-semibold text-slate-900 dark:text-slate-100">
+              {user.email}
+            </span>
+            . Ask your restaurant owner to open <strong>Employees / Staff</strong>, add this exact Gmail address, and turn ON <strong>Waiter Mobile App Access</strong>.
+          </p>
+          <div className="flex flex-col gap-2 pt-2">
+            <button
+              type="button"
+              onClick={() => void signOut(auth)}
+              className="w-full rounded-lg bg-slate-900 dark:bg-slate-100 px-4 py-2.5 text-xs font-semibold text-white dark:text-slate-900 cursor-pointer"
+            >
+              Sign Out / Switch Google Account
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setPreferWaiterMode(false);
+                setCreateStoreOpen(true);
+              }}
+              className="w-full rounded-lg border border-slate-200 dark:border-slate-700 px-4 py-2.5 text-xs font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
+            >
+              I am a Restaurant Owner — Set Up My Own Store
+            </button>
+          </div>
+        </div>
+        <OfflineIndicator />
+      </div>
     );
   }
 
@@ -299,9 +762,13 @@ function POSWorkspace() {
 
   const navItems: { id: AppTab; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
     { id: 'billing', label: 'POS Billing', icon: ShoppingCart },
+    ...(!isRetail && activeStore
+      ? [{ id: 'waiter' as const, label: 'Waiter Order & KOT', icon: Smartphone }]
+      : []),
     { id: 'inventory', label: 'Inventory & Stock', icon: Package },
     ...(isRetail ? [{ id: 'barcodes' as const, label: 'Barcode Labels', icon: Barcode }] : []),
     { id: 'sales', label: 'Sales & Bills', icon: Receipt },
+    { id: 'employees', label: 'Employees / Staff', icon: Users },
     { id: 'analytics', label: 'Owner Analytics', icon: BarChart3 },
     { id: 'settings', label: 'Brand Settings', icon: Settings },
   ];
@@ -444,15 +911,33 @@ function POSWorkspace() {
               {user.email}
             </div>
           </div>
-          <button
-            type="button"
-            onClick={() => void signOut(auth)}
-            className="rounded-lg p-2 text-slate-500 hover:text-red-600 dark:hover:text-red-400 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
-            title="Sign out"
-            aria-label="Sign out"
-          >
-            <LogOut className="w-4 h-4" />
-          </button>
+          <div className="flex items-center gap-0.5 shrink-0">
+            <button
+              type="button"
+              onClick={() => {
+                setPasswordModalOpen(true);
+                setMobileNavOpen(false);
+              }}
+              className={`rounded-lg p-2 cursor-pointer ${
+                hasPasswordProvider
+                  ? 'text-slate-500 hover:text-slate-900 dark:hover:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-800'
+                  : 'text-amber-600 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-950/40'
+              }`}
+              title={hasPasswordProvider ? 'Change login password' : 'Create login password'}
+              aria-label={hasPasswordProvider ? 'Change login password' : 'Create login password'}
+            >
+              <KeyRound className="w-4 h-4" />
+            </button>
+            <button
+              type="button"
+              onClick={() => void signOut(auth)}
+              className="rounded-lg p-2 text-slate-500 hover:text-red-600 dark:hover:text-red-400 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+              title="Sign out"
+              aria-label="Sign out"
+            >
+              <LogOut className="w-4 h-4" />
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -505,6 +990,16 @@ function POSWorkspace() {
           </div>
 
           <div className="flex items-center gap-2 shrink-0">
+            {activeWaiterGrant && (
+              <button
+                type="button"
+                onClick={() => setPreferWaiterMode(true)}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-200 dark:border-emerald-900/60 bg-emerald-50 dark:bg-emerald-950/30 px-3 py-1.5 text-xs font-semibold text-emerald-700 dark:text-emerald-300 hover:bg-emerald-100 dark:hover:bg-emerald-950/50 whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                <Smartphone className="w-3.5 h-3.5" />
+                <span>Waiter Mobile</span>
+              </button>
+            )}
             <button
               type="button"
               onClick={() => setCreateStoreOpen(true)}
@@ -543,9 +1038,22 @@ function POSWorkspace() {
                 <BillingView
                   store={activeStore}
                   products={products}
+                  tableSessions={tableSessions}
+                  customers={customers}
+                  employees={employees}
                   ownerId={user.uid}
                   onPrintJob={setPrintJob}
                   onGoToInventory={() => setActiveTab('inventory')}
+                  onGoToEmployees={() => setActiveTab('employees')}
+                />
+              )}
+              {activeTab === 'waiter' && !isRetail && (
+                <WaiterOrderView
+                  store={activeStore}
+                  products={products}
+                  tableSessions={tableSessions}
+                  employees={employees}
+                  onPrintJob={setPrintJob}
                 />
               )}
               {activeTab === 'inventory' && (
@@ -568,8 +1076,18 @@ function POSWorkspace() {
                   store={activeStore}
                   sales={sales}
                   products={products}
+                  employees={employees}
                   ownerId={user.uid}
                   onPrintJob={setPrintJob}
+                />
+              )}
+              {activeTab === 'employees' && (
+                <EmployeesView
+                  store={activeStore}
+                  employees={employees}
+                  sales={sales}
+                  tableSessions={tableSessions}
+                  ownerId={user.uid}
                 />
               )}
               {activeTab === 'analytics' && (
@@ -577,6 +1095,7 @@ function POSWorkspace() {
                   store={activeStore}
                   sales={sales}
                   products={products}
+                  employees={employees}
                   onPrintJob={setPrintJob}
                 />
               )}
@@ -585,6 +1104,9 @@ function POSWorkspace() {
                   store={activeStore}
                   darkMode={darkMode}
                   onToggleDarkMode={() => setDarkMode((v) => !v)}
+                  userEmail={user.email}
+                  hasPassword={hasPasswordProvider}
+                  onOpenPasswordSetup={() => setPasswordModalOpen(true)}
                 />
               )}
             </>
@@ -592,12 +1114,21 @@ function POSWorkspace() {
         </main>
       </div>
 
-      {/* Onboarding Modal (auto-opens if signed-in owner has zero stores) */}
+      {/* Onboarding Modal (auto-opens if signed-in owner has zero stores and no waiter grant) */}
       <StoreOnboardingModal
-        isOpen={createStoreOpen || (storesLoaded && stores.length === 0)}
+        isOpen={onboardingRequired}
         canClose={stores.length > 0}
         onClose={() => setCreateStoreOpen(false)}
         onCreate={handleCreateStore}
+      />
+
+      {/* Post-Sign-In Create / Change Password Modal */}
+      <PasswordSetupModal
+        user={user}
+        isOpen={passwordModalOpen}
+        hasPasswordProvider={hasPasswordProvider}
+        onClose={handleClosePasswordModal}
+        onPasswordSaved={() => setPasswordLinkedTick((t) => t + 1)}
       />
 
       {/* Unified Thermal Receipt, KOT, Barcode Sheet & Daily Z-Report Printer */}

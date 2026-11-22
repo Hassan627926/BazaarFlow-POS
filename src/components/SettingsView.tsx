@@ -1,9 +1,11 @@
 import React, { useEffect, useState } from 'react';
 import {
   Check,
+  KeyRound,
   Monitor,
   Moon,
   Printer,
+  ShieldCheck,
   Smartphone,
   Store,
   Sun,
@@ -21,12 +23,18 @@ interface SettingsViewProps {
   store: StoreConfig;
   darkMode: boolean;
   onToggleDarkMode: () => void;
+  userEmail?: string | null;
+  hasPassword?: boolean;
+  onOpenPasswordSetup?: () => void;
 }
 
 export const SettingsView: React.FC<SettingsViewProps> = ({
   store,
   darkMode,
   onToggleDarkMode,
+  userEmail,
+  hasPassword = false,
+  onOpenPasswordSetup,
 }) => {
   const [name, setName] = useState(store.name);
   const [businessType, setBusinessType] = useState<BusinessType>(store.businessType);
@@ -35,6 +43,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [accentColor, setAccentColor] = useState(store.accentColor);
   const [currency, setCurrency] = useState(store.currency);
   const [taxRate, setTaxRate] = useState(String(store.taxRate));
+  const [tableCount, setTableCount] = useState(
+    String(store.tableCount ?? BLUEPRINT_LIMITS.TABLE_COUNT_DEFAULT)
+  );
   const [address, setAddress] = useState(store.address);
   const [phone, setPhone] = useState(store.phone);
   const [receiptFooter, setReceiptFooter] = useState(store.receiptFooter);
@@ -50,6 +61,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     setAccentColor(store.accentColor);
     setCurrency(store.currency);
     setTaxRate(String(store.taxRate));
+    setTableCount(String(store.tableCount ?? BLUEPRINT_LIMITS.TABLE_COUNT_DEFAULT));
     setAddress(store.address);
     setPhone(store.phone);
     setReceiptFooter(store.receiptFooter);
@@ -87,6 +99,16 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       return;
     }
 
+    const parsedTables = Math.round(Number(tableCount || BLUEPRINT_LIMITS.TABLE_COUNT_DEFAULT));
+    if (
+      !Number.isFinite(parsedTables) ||
+      parsedTables < 1 ||
+      parsedTables > BLUEPRINT_LIMITS.TABLE_COUNT_MAX
+    ) {
+      setError(`Table count must be between 1 and ${BLUEPRINT_LIMITS.TABLE_COUNT_MAX}.`);
+      return;
+    }
+
     setSaving(true);
     setError(null);
     setSavedNotice(false);
@@ -100,6 +122,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         accentColor,
         currency: currency.trim().slice(0, BLUEPRINT_LIMITS.CURRENCY_MAX) || 'PKR',
         taxRate: parsedTax,
+        tableCount: parsedTables,
         address: address.trim().slice(0, BLUEPRINT_LIMITS.ADDRESS_MAX),
         phone: phone.trim().slice(0, BLUEPRINT_LIMITS.PHONE_MAX),
         receiptFooter: receiptFooter.trim().slice(0, BLUEPRINT_LIMITS.RECEIPT_FOOTER_MAX),
@@ -257,6 +280,23 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-3.5 py-2 text-sm font-mono tabular-nums text-slate-900 dark:text-slate-100"
               />
             </div>
+
+            {businessType === 'restaurant' && (
+              <div className="sm:col-span-2">
+                <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
+                  Dine-In Tables Count (1 – {BLUEPRINT_LIMITS.TABLE_COUNT_MAX})
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  max={BLUEPRINT_LIMITS.TABLE_COUNT_MAX}
+                  step="1"
+                  value={tableCount}
+                  onChange={(e) => setTableCount(e.target.value)}
+                  className="w-full sm:w-48 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-3.5 py-2 text-sm font-mono tabular-nums text-slate-900 dark:text-slate-100"
+                />
+              </div>
+            )}
 
             <div>
               <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
@@ -450,6 +490,36 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             </div>
           </div>
         </div>
+
+        {onOpenPasswordSetup && userEmail && (
+          <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 space-y-3">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-sm font-bold font-display text-slate-900 dark:text-slate-100">
+                <KeyRound className="w-4 h-4 brand-text" />
+                <span>Email & Password Login</span>
+              </div>
+              {hasPassword && (
+                <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-700 dark:text-emerald-400">
+                  <ShieldCheck className="w-3.5 h-3.5" />
+                  <span>Active</span>
+                </span>
+              )}
+            </div>
+            <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+              {hasPassword
+                ? `Email & password sign-in is enabled for ${userEmail}. You can update your password anytime.`
+                : `Create a password for ${userEmail} so next time you can sign in directly with email and password without Google popup.`}
+            </p>
+            <button
+              type="button"
+              onClick={onOpenPasswordSetup}
+              className="w-full inline-flex items-center justify-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/70 px-4 py-2 text-xs font-semibold text-slate-800 dark:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+            >
+              <KeyRound className="w-3.5 h-3.5" />
+              <span>{hasPassword ? 'Change Password' : 'Create a Password'}</span>
+            </button>
+          </div>
+        )}
 
         <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 space-y-4">
           <div>

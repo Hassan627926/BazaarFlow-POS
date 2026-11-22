@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
-import { Printer, X } from 'lucide-react';
-import type { PrintJob, StoreConfig } from '../types';
+import React, { useEffect, useState } from 'react';
+import { Download, ExternalLink, FileText, MessageCircle, Printer, X } from 'lucide-react';
+import type { PrintJob, Sale, StoreConfig } from '../types';
 import { formatDateTime, formatMoney } from '../utils/posHelpers';
+import { generateReceiptPdfFile, triggerPdfDownload } from '../utils/receiptPdf';
 import { BarcodeSvg } from './BarcodeSvg';
 
 interface PrintModalProps {
@@ -10,13 +11,165 @@ interface PrintModalProps {
   onClose: () => void;
 }
 
+function formatWhatsAppNumber(raw: string, currency: string): string {
+  let digits = raw.replace(/\D/g, '');
+  if (!digits) return '';
+  if (digits.startsWith('00')) {
+    digits = digits.slice(2);
+  }
+  // Auto-prepend Pakistan country code for 11-digit local mobile numbers (03XXXXXXXXX) when store uses PKR
+  if (currency.toUpperCase() === 'PKR' && digits.length === 11 && digits.startsWith('03')) {
+    digits = `92${digits.slice(1)}`;
+  }
+  return digits;
+}
+
+function buildWhatsAppReceiptText(sale: Sale, store: StoreConfig): string {
+  const lines: string[] = [];
+  lines.push(`*${store.name}*`);
+  if (store.address) lines.push(store.address);
+  if (store.phone) lines.push(`Tel: ${store.phone}`);
+  lines.push('────────────────────');
+  lines.push(`*Invoice:* ${sale.invoiceNumber}`);
+  lines.push(`*Date:* ${formatDateTime(sale.createdAt)}`);
+  if (store.businessType === 'restaurant') {
+    const orderLabel = sale.orderType.replace('_', ' ').toUpperCase();
+    lines.push(`*Order:* ${orderLabel}${sale.tableNumber ? ` · Table ${sale.tableNumber}` : ''}`);
+  }
+  if (sale.employeeName) lines.push(`*Staff:* ${sale.employeeName}`);
+  if (sale.customerName) lines.push(`*Customer:* ${sale.customerName}`);
+  if (sale.customerPhone) lines.push(`*Phone:* ${sale.customerPhone}`);
+  if (sale.customerAddress) lines.push(`*Address:* ${sale.customerAddress}`);
+  if (sale.status === 'voided') lines.push('*STATUS: VOIDED RECEIPT*');
+  lines.push('────────────────────');
+  lines.push('*Items:*');
+  sale.items.forEach((item, idx) => {
+    lines.push(`${idx + 1}. ${item.name}`);
+    lines.push(
+      `   ${item.quantity} × ${formatMoney(item.unitPrice, store.currency)} = ${formatMoney(
+        item.lineTotal,
+        store.currency
+      )}`
+    );
+  });
+  lines.push('────────────────────');
+  lines.push(`Subtotal (${sale.itemCount} items): ${formatMoney(sale.subtotal, store.currency)}`);
+  lines.push(`Tax (${sale.taxRate ?? 0}%): ${formatMoney(sale.taxAmount ?? 0, store.currency)}`);
+  if (sale.discount > 0) {
+    lines.push(`Discount: -${formatMoney(sale.discount, store.currency)}`);
+  }
+  lines.push(`*GRAND TOTAL: ${formatMoney(sale.total, store.currency)}*`);
+  if (sale.paymentMethod === 'cash') {
+    lines.push(`Cash Received: ${formatMoney(sale.amountTendered, store.currency)}`);
+    lines.push(`*Change / Return: ${formatMoney(sale.changeDue ?? 0, store.currency)}*`);
+  } else {
+    lines.push(
+      `Payment (${sale.paymentMethod.replace('_', '/').toUpperCase()}): ${formatMoney(
+        sale.amountTendered,
+        store.currency
+      )}`
+    );
+  }
+  lines.push('────────────────────');
+  lines.push(store.receiptFooter || 'Thank you for your business!');
+  return lines.join('\n');
+}
+
 export const PrintModal: React.FC<PrintModalProps> = ({ job, store, onClose }) => {
   const [paperWidth, setPaperWidth] = useState<'80mm' | '58mm'>('80mm');
+  const [whatsappPhone, setWhatsappPhone] = useState<string>('');
+  const [pdfBusy, setPdfBusy] = useState<boolean>(false);
+  const [pdfNotice, setPdfNotice] = useState<{ filename: string; mode: 'shared' | 'downloaded' } | null>(null);
+  const [pdfError, setPdfError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (job && job.type === 'receipt') {
+      setWhatsappPhone(job.sale.customerPhone || '');
+      setPdfNotice(null);
+      setPdfError(null);
+    }
+  }, [job]);
 
   if (!job) return null;
 
   const handlePrint = () => {
     window.print();
+  };
+
+  const receiptWhatsAppText =
+    job.type === 'receipt' ? buildWhatsAppReceiptText(job.sale, store) : '';
+  const formattedWaDigits =
+    job.type === 'receipt' ? formatWhatsAppNumber(whatsappPhone, store.currency) : '';
+  const whatsappTextUrl =
+    job.type === 'receipt'
+      ? `https://wa.me/${formattedWaDigits}?text=${encodeURIComponent(receiptWhatsAppText)}`
+      : '';
+  const whatsappPdfCaption =
+    job.type === 'receipt'
+      ? `Bill ${job.sale.invoiceNumber} from ${store.name} — Grand Total: ${formatMoney(
+          job.sale.total,
+          store.currency
+        )}. Please find the attached PDF bill.`
+      : '';
+  const whatsappPdfChatUrl =
+    job.type === 'receipt'
+      ? `https://wa.me/${formattedWaDigits}?text=${encodeURIComponent(whatsappPdfCaption)}`
+      : '';
+
+  const handleDownloadPdf = async () => {
+    if (job.type !== 'receipt') return;
+    setPdfBusy(true);
+    setPdfError(null);
+    try {
+      const { blob, filename } = await generateReceiptPdfFile(job.sale, store, paperWidth);
+      triggerPdfDownload(blob, filename);
+      setPdfNotice({ filename, mode: 'downloaded' });
+    } catch {
+      setPdfError('Could not generate PDF bill. Please try again.');
+    } finally {
+      setPdfBusy(false);
+    }
+  };
+
+  const handleSharePdfWhatsApp = async () => {
+    if (job.type !== 'receipt') return;
+    setPdfBusy(true);
+    setPdfError(null);
+    setPdfNotice(null);
+
+    try {
+      const { blob, file, filename } = await generateReceiptPdfFile(job.sale, store, paperWidth);
+
+      // On Mobile (Android / iOS) & Web Share File-capable devices, share the real .pdf file directly to WhatsApp
+      const nav = navigator as Navigator & {
+        canShare?: (data?: ShareData) => boolean;
+      };
+      if (typeof nav.share === 'function' && typeof nav.canShare === 'function' && nav.canShare({ files: [file] })) {
+        try {
+          await nav.share({
+            files: [file],
+            title: `${store.name} — Bill ${job.sale.invoiceNumber}`,
+            text: whatsappPdfCaption,
+          });
+          setPdfNotice({ filename, mode: 'shared' });
+          return;
+        } catch (shareErr) {
+          // If user simply closed the share sheet, do not treat as failure
+          if (shareErr instanceof Error && shareErr.name === 'AbortError') {
+            return;
+          }
+          // Otherwise (e.g. iframe restriction or desktop browser), fall through to instant PDF download + WhatsApp chat link
+        }
+      }
+
+      // Desktop / browser fallback: download the real PDF immediately and display 1-click Open WhatsApp Chat button
+      triggerPdfDownload(blob, filename);
+      setPdfNotice({ filename, mode: 'downloaded' });
+    } catch {
+      setPdfError('Could not prepare PDF bill. Please try again.');
+    } finally {
+      setPdfBusy(false);
+    }
   };
 
   const renderReceipt = (sale: Extract<PrintJob, { type: 'receipt' }>['sale']) => {
@@ -59,10 +212,28 @@ export const PrintModal: React.FC<PrintModalProps> = ({ job, store, onClose }) =
               </span>
             </div>
           )}
+          {sale.employeeName && (
+            <div className="flex justify-between gap-2">
+              <span>Staff</span>
+              <span className="text-right font-semibold">{sale.employeeName}</span>
+            </div>
+          )}
           {sale.customerName && (
-            <div className="flex justify-between">
+            <div className="flex justify-between gap-2">
               <span>Customer</span>
-              <span>{sale.customerName}</span>
+              <span className="text-right font-medium">{sale.customerName}</span>
+            </div>
+          )}
+          {sale.customerPhone && (
+            <div className="flex justify-between gap-2">
+              <span>Phone</span>
+              <span className="text-right">{sale.customerPhone}</span>
+            </div>
+          )}
+          {sale.customerAddress && (
+            <div className="flex justify-between gap-2">
+              <span className="shrink-0">Address</span>
+              <span className="text-right">{sale.customerAddress}</span>
             </div>
           )}
           {sale.status === 'voided' && (
@@ -101,30 +272,39 @@ export const PrintModal: React.FC<PrintModalProps> = ({ job, store, onClose }) =
             <span>Subtotal ({sale.itemCount} items)</span>
             <span className="tabular-nums">{formatMoney(sale.subtotal, store.currency)}</span>
           </div>
+          <div className="flex justify-between">
+            <span>Tax ({sale.taxRate ?? 0}%)</span>
+            <span className="tabular-nums">{formatMoney(sale.taxAmount ?? 0, store.currency)}</span>
+          </div>
           {sale.discount > 0 && (
             <div className="flex justify-between">
               <span>Discount</span>
               <span className="tabular-nums">-{formatMoney(sale.discount, store.currency)}</span>
             </div>
           )}
-          {sale.taxAmount > 0 && (
-            <div className="flex justify-between">
-              <span>Tax ({sale.taxRate}%)</span>
-              <span className="tabular-nums">{formatMoney(sale.taxAmount, store.currency)}</span>
-            </div>
-          )}
           <div className="flex justify-between border-t border-slate-300 pt-1.5 text-sm font-bold">
             <span>GRAND TOTAL</span>
             <span className="tabular-nums">{formatMoney(sale.total, store.currency)}</span>
           </div>
-          <div className="flex justify-between pt-1">
-            <span>Payment ({sale.paymentMethod.replace('_', '/').toUpperCase()})</span>
-            <span className="tabular-nums">{formatMoney(sale.amountTendered, store.currency)}</span>
-          </div>
-          {sale.changeDue > 0 && (
-            <div className="flex justify-between">
-              <span>Change Due</span>
-              <span className="tabular-nums">{formatMoney(sale.changeDue, store.currency)}</span>
+          {sale.paymentMethod === 'cash' ? (
+            <>
+              <div className="flex justify-between pt-1">
+                <span>Cash Received</span>
+                <span className="tabular-nums font-medium">
+                  {formatMoney(sale.amountTendered, store.currency)}
+                </span>
+              </div>
+              <div className="flex justify-between font-semibold">
+                <span>Change / Return</span>
+                <span className="tabular-nums">
+                  {formatMoney(sale.changeDue ?? 0, store.currency)}
+                </span>
+              </div>
+            </>
+          ) : (
+            <div className="flex justify-between pt-1">
+              <span>Payment ({sale.paymentMethod.replace('_', '/').toUpperCase()})</span>
+              <span className="tabular-nums">{formatMoney(sale.amountTendered, store.currency)}</span>
             </div>
           )}
         </div>
@@ -136,10 +316,21 @@ export const PrintModal: React.FC<PrintModalProps> = ({ job, store, onClose }) =
     );
   };
 
-  const renderKOT = (sale: Extract<PrintJob, { type: 'kot' }>['sale']) => (
+  const renderKOT = (
+    sale: Extract<PrintJob, { type: 'kot' }>['sale'],
+    isAddOn?: boolean,
+    isRevised?: boolean,
+    changeNotes?: string[]
+  ) => (
     <div className="print-receipt-sheet mx-auto max-w-[320px] bg-white text-slate-950 border border-slate-200 rounded-lg p-5 font-mono text-xs">
       <div className="text-center border-b-2 border-slate-900 pb-2.5">
-        <div className="text-xs font-semibold tracking-wider">KITCHEN ORDER TICKET</div>
+        <div className="text-xs font-semibold tracking-wider">
+          {isRevised
+            ? 'REVISED KITCHEN ORDER TICKET'
+            : isAddOn
+            ? 'ADD-ON KITCHEN ORDER TICKET'
+            : 'KITCHEN ORDER TICKET'}
+        </div>
         <div className="text-lg font-bold font-display mt-0.5">{store.name}</div>
       </div>
 
@@ -153,7 +344,23 @@ export const PrintModal: React.FC<PrintModalProps> = ({ job, store, onClose }) =
         <span>{formatDateTime(sale.createdAt)}</span>
       </div>
 
+      {isRevised && changeNotes && changeNotes.length > 0 && (
+        <div className="py-2.5 border-b border-dashed border-slate-400 space-y-1">
+          <div className="text-[11px] font-bold uppercase tracking-wide">Changes Made:</div>
+          {changeNotes.map((note, idx) => (
+            <div key={idx} className="text-xs font-bold">
+              {note}
+            </div>
+          ))}
+        </div>
+      )}
+
       <div className="py-3 space-y-2">
+        {isRevised && (
+          <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-600">
+            Updated Table Order:
+          </div>
+        )}
         {sale.items.map((item, idx) => (
           <div key={`${item.productId}-${idx}`} className="flex items-start justify-between text-sm">
             <span className="font-bold pr-3 tabular-nums">{item.quantity}x</span>
@@ -162,9 +369,12 @@ export const PrintModal: React.FC<PrintModalProps> = ({ job, store, onClose }) =
         ))}
       </div>
 
-      {sale.customerName && (
-        <div className="border-t border-dashed border-slate-300 pt-2 text-[11px]">
-          Guest / Note: {sale.customerName}
+      {(sale.employeeName || sale.customerName || sale.customerPhone || sale.customerAddress) && (
+        <div className="border-t border-dashed border-slate-300 pt-2 space-y-0.5 text-[11px]">
+          {sale.employeeName && <div className="font-bold">Staff: {sale.employeeName}</div>}
+          {sale.customerName && <div>Customer: {sale.customerName}</div>}
+          {sale.customerPhone && <div>Phone: {sale.customerPhone}</div>}
+          {sale.customerAddress && <div>Address: {sale.customerAddress}</div>}
         </div>
       )}
     </div>
@@ -405,9 +615,87 @@ export const PrintModal: React.FC<PrintModalProps> = ({ job, store, onClose }) =
           </div>
         </div>
 
+        {/* WhatsApp PDF Bill Share Bar (Receipt Print Screen Only) */}
+        {job.type === 'receipt' && (
+          <div className="border-b border-slate-200 dark:border-slate-800 bg-emerald-50/70 dark:bg-emerald-950/25 px-5 py-3 space-y-2.5 no-print">
+            <div className="flex flex-wrap items-center justify-between gap-2.5">
+              <div className="flex items-center gap-2 flex-1 min-w-[200px]">
+                <MessageCircle className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                <input
+                  type="tel"
+                  value={whatsappPhone}
+                  onChange={(e) => setWhatsappPhone(e.target.value)}
+                  placeholder="Customer WhatsApp # (e.g. 03001234567 — optional)"
+                  aria-label="Customer WhatsApp Number"
+                  className="w-full rounded-lg border border-emerald-200 dark:border-emerald-800/80 bg-white dark:bg-slate-900 px-3 py-1.5 text-xs font-mono text-slate-900 dark:text-slate-100 placeholder:font-sans placeholder:text-slate-400"
+                />
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  disabled={pdfBusy}
+                  onClick={() => void handleSharePdfWhatsApp()}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 px-3.5 py-1.5 text-xs font-semibold text-white whitespace-nowrap disabled:opacity-60 transition-colors cursor-pointer"
+                >
+                  <FileText className="w-3.5 h-3.5" />
+                  <span>{pdfBusy ? 'Creating PDF...' : 'Share PDF on WhatsApp'}</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={pdfBusy}
+                  onClick={() => void handleDownloadPdf()}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-60 whitespace-nowrap cursor-pointer"
+                  title="Download thermal PDF bill"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Download PDF</span>
+                </button>
+                <a
+                  href={whatsappTextUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-medium text-emerald-800 dark:text-emerald-300 hover:underline whitespace-nowrap"
+                  title="Send plain text bill on WhatsApp"
+                >
+                  <span>Text Bill</span>
+                </a>
+              </div>
+            </div>
+
+            {pdfNotice && pdfNotice.mode === 'downloaded' && (
+              <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-emerald-300 dark:border-emerald-800 bg-white dark:bg-slate-900 px-3 py-2 text-xs">
+                <div className="text-slate-700 dark:text-slate-200 min-w-0">
+                  PDF saved (<span className="font-mono font-semibold">{pdfNotice.filename}</span>) — open
+                  WhatsApp and attach/drop this PDF file.
+                </div>
+                <a
+                  href={whatsappPdfChatUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1.5 rounded-md bg-emerald-600 hover:bg-emerald-700 px-3 py-1.5 text-xs font-semibold text-white whitespace-nowrap shrink-0 transition-colors"
+                >
+                  <ExternalLink className="w-3.5 h-3.5" />
+                  <span>Open WhatsApp Chat</span>
+                </a>
+              </div>
+            )}
+
+            {pdfNotice && pdfNotice.mode === 'shared' && (
+              <div className="text-xs font-medium text-emerald-800 dark:text-emerald-300">
+                PDF bill ({pdfNotice.filename}) shared successfully.
+              </div>
+            )}
+
+            {pdfError && (
+              <div className="text-xs font-medium text-red-600 dark:text-red-400">{pdfError}</div>
+            )}
+          </div>
+        )}
+
         <div className="p-5 max-h-[78vh] overflow-y-auto print:max-h-none print:overflow-visible print:p-0">
           {job.type === 'receipt' && renderReceipt(job.sale)}
-          {job.type === 'kot' && renderKOT(job.sale)}
+          {job.type === 'kot' && renderKOT(job.sale, job.isAddOn, job.isRevised, job.changeNotes)}
           {job.type === 'barcodes' && renderBarcodeSheet(job.labels)}
           {job.type === 'daily_report' && renderDailyReport(job.dateKey, job.sales, job.products)}
         </div>

@@ -11,7 +11,7 @@ import {
   YAxis,
 } from 'recharts';
 import { Calendar, Download, FileSpreadsheet, Printer } from 'lucide-react';
-import type { PrintJob, Product, Sale, StoreConfig } from '../types';
+import type { Employee, PrintJob, Product, Sale, StoreConfig } from '../types';
 import {
   exportDailySummaryCSV,
   exportInventoryCSV,
@@ -24,6 +24,7 @@ interface AnalyticsViewProps {
   store: StoreConfig;
   sales: Sale[];
   products: Product[];
+  employees: Employee[];
   onPrintJob: (job: PrintJob) => void;
 }
 
@@ -31,6 +32,7 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
   store,
   sales,
   products,
+  employees,
   onPrintJob,
 }) => {
   const [reportDate, setReportDate] = useState(getTodayDateKey());
@@ -122,6 +124,50 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
     () => products.filter((p) => p.stock <= p.minStock).slice(0, 6),
     [products]
   );
+
+  const staffReport = useMemo(() => {
+    const map = new Map<
+      string,
+      { name: string; role: string; orders: number; voided: number; discounts: number; revenue: number }
+    >();
+
+    employees.forEach((emp) => {
+      map.set(emp.id, {
+        name: emp.name,
+        role: emp.role,
+        orders: 0,
+        voided: 0,
+        discounts: 0,
+        revenue: 0,
+      });
+    });
+
+    const daySales = sales.filter((s) => s.dateKey === reportDate);
+    for (const s of daySales) {
+      if (!s.employeeId && !s.employeeName) continue;
+      const key = s.employeeId || `name_${s.employeeName}`;
+      const existing = map.get(key) ?? {
+        name: s.employeeName || 'Staff',
+        role: 'Staff',
+        orders: 0,
+        voided: 0,
+        discounts: 0,
+        revenue: 0,
+      };
+      if (s.status === 'voided') {
+        existing.voided += 1;
+      } else {
+        existing.orders += 1;
+        existing.revenue += s.total;
+        existing.discounts += s.discount;
+      }
+      map.set(key, existing);
+    }
+
+    return Array.from(map.values())
+      .filter((r) => r.orders > 0 || r.voided > 0 || employees.length > 0)
+      .sort((a, b) => b.revenue - a.revenue || b.voided - a.voided);
+  }, [employees, sales, reportDate]);
 
   return (
     <div className="space-y-5">
@@ -412,6 +458,64 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Staff Accountability & Performance Table (Selected Date) */}
+      {staffReport.length > 0 && (
+        <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden">
+          <div className="px-5 py-3.5 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-2">
+            <div>
+              <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                Staff Accountability & Performance ({reportDate})
+              </h3>
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                Track handled orders, discounts granted, and voided bills per employee
+              </p>
+            </div>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse text-xs">
+              <thead>
+                <tr className="border-b border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400 bg-slate-50/70 dark:bg-slate-950/40">
+                  <th className="py-2.5 px-4">Employee</th>
+                  <th className="py-2.5 px-4">Role</th>
+                  <th className="py-2.5 px-4 text-right">Completed</th>
+                  <th className="py-2.5 px-4 text-right">Voided</th>
+                  <th className="py-2.5 px-4 text-right">Discounts</th>
+                  <th className="py-2.5 px-4 text-right">Revenue</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                {staffReport.map((row) => (
+                  <tr key={`${row.name}-${row.role}`}>
+                    <td className="py-2.5 px-4 font-semibold text-slate-900 dark:text-slate-100">
+                      {row.name}
+                    </td>
+                    <td className="py-2.5 px-4 text-slate-600 dark:text-slate-400">{row.role}</td>
+                    <td className="py-2.5 px-4 text-right font-mono tabular-nums text-slate-800 dark:text-slate-200">
+                      {row.orders}
+                    </td>
+                    <td
+                      className={`py-2.5 px-4 text-right font-mono tabular-nums ${
+                        row.voided > 0
+                          ? 'text-red-600 dark:text-red-400 font-semibold'
+                          : 'text-slate-400'
+                      }`}
+                    >
+                      {row.voided}
+                    </td>
+                    <td className="py-2.5 px-4 text-right font-mono tabular-nums text-slate-600 dark:text-slate-300">
+                      {formatMoney(row.discounts, store.currency)}
+                    </td>
+                    <td className="py-2.5 px-4 text-right font-mono tabular-nums font-semibold text-slate-900 dark:text-slate-100">
+                      {formatMoney(row.revenue, store.currency)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

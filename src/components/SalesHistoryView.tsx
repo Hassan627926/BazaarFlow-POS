@@ -4,6 +4,7 @@ import { doc, serverTimestamp, writeBatch } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '../firebase';
 import {
   BLUEPRINT_LIMITS,
+  type Employee,
   type PaymentMethod,
   type PrintJob,
   type Product,
@@ -22,6 +23,7 @@ interface SalesHistoryViewProps {
   store: StoreConfig;
   sales: Sale[];
   products: Product[];
+  employees: Employee[];
   ownerId: string;
   onPrintJob: (job: PrintJob) => void;
 }
@@ -30,6 +32,7 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
   store,
   sales,
   products,
+  employees,
   ownerId,
   onPrintJob,
 }) => {
@@ -38,10 +41,22 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
   const [dateFilter, setDateFilter] = useState<'today' | 'all' | 'custom'>('today');
   const [customDate, setCustomDate] = useState(getTodayDateKey());
   const [paymentFilter, setPaymentFilter] = useState<'all' | PaymentMethod>('all');
+  const [employeeFilter, setEmployeeFilter] = useState<string>('all');
   const [selectedSale, setSelectedSale] = useState<Sale | null>(null);
   const [voidingId, setVoidingId] = useState<string | null>(null);
 
   const todayKey = getTodayDateKey();
+
+  const employeeFilterOptions = useMemo(() => {
+    const map = new Map<string, string>();
+    employees.forEach((e) => map.set(e.id, e.name));
+    sales.forEach((s) => {
+      if (s.employeeId && s.employeeName && !map.has(s.employeeId)) {
+        map.set(s.employeeId, s.employeeName);
+      }
+    });
+    return Array.from(map.entries()).sort((a, b) => a[1].localeCompare(b[1]));
+  }, [employees, sales]);
 
   const filteredSales = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -49,15 +64,21 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
       if (dateFilter === 'today' && s.dateKey !== todayKey) return false;
       if (dateFilter === 'custom' && s.dateKey !== customDate) return false;
       if (paymentFilter !== 'all' && s.paymentMethod !== paymentFilter) return false;
+      if (employeeFilter === '__unassigned__' && s.employeeId) return false;
+      if (employeeFilter !== 'all' && employeeFilter !== '__unassigned__' && s.employeeId !== employeeFilter) {
+        return false;
+      }
       if (!q) return true;
       return (
         s.invoiceNumber.toLowerCase().includes(q) ||
         s.customerName.toLowerCase().includes(q) ||
+        (s.customerPhone ?? '').toLowerCase().includes(q) ||
+        (s.employeeName ?? '').toLowerCase().includes(q) ||
         s.tableNumber.toLowerCase().includes(q) ||
         s.items.some((i) => i.name.toLowerCase().includes(q))
       );
     });
-  }, [sales, dateFilter, customDate, todayKey, paymentFilter, search]);
+  }, [sales, dateFilter, customDate, todayKey, paymentFilter, employeeFilter, search]);
 
   const summary = useMemo(() => {
     const completed = filteredSales.filter((s) => s.status === 'completed');
@@ -184,6 +205,22 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
               <option value="card">Card</option>
               <option value="bank_qr">Bank / QR</option>
             </select>
+
+            {employeeFilterOptions.length > 0 && (
+              <select
+                value={employeeFilter}
+                onChange={(e) => setEmployeeFilter(e.target.value)}
+                className="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-2.5 py-1.5 text-xs text-slate-800 dark:text-slate-200"
+              >
+                <option value="all">All Employees</option>
+                {employeeFilterOptions.map(([id, empName]) => (
+                  <option key={id} value={id}>
+                    {empName}
+                  </option>
+                ))}
+                <option value="__unassigned__">Unassigned</option>
+              </select>
+            )}
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
@@ -216,6 +253,7 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
                 <th className="py-3 px-4">Invoice</th>
                 <th className="py-3 px-4">Date & Time</th>
                 <th className="py-3 px-4">{isRetail ? 'Customer' : 'Order / Table'}</th>
+                <th className="py-3 px-4">Staff</th>
                 <th className="py-3 px-4">Payment</th>
                 <th className="py-3 px-4">Status</th>
                 <th className="py-3 px-4 text-right">Total</th>
@@ -225,7 +263,7 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
             <tbody className="divide-y divide-slate-100 dark:divide-slate-800 text-xs">
               {filteredSales.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="py-10 text-center text-sm text-slate-500 dark:text-slate-400">
+                  <td colSpan={8} className="py-10 text-center text-sm text-slate-500 dark:text-slate-400">
                     No sales bills recorded for this filter.
                   </td>
                 </tr>
@@ -245,11 +283,20 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
                       {isRetail ? (
                         sale.customerName || 'Walk-in'
                       ) : (
-                        <>
+                        <div>
                           <span className="capitalize">{sale.orderType.replace('_', ' ')}</span>
                           {sale.tableNumber ? ` · T-${sale.tableNumber}` : ''}
-                        </>
+                          {sale.customerName ? ` · ${sale.customerName}` : ''}
+                          {sale.customerPhone && (
+                            <div className="text-[11px] font-mono text-slate-500 dark:text-slate-400">
+                              {sale.customerPhone}
+                            </div>
+                          )}
+                        </div>
                       )}
+                    </td>
+                    <td className="py-3 px-4 text-slate-700 dark:text-slate-300 font-medium whitespace-nowrap">
+                      {sale.employeeName || <span className="text-slate-400 font-normal">—</span>}
                     </td>
                     <td className="py-3 px-4 uppercase font-mono text-slate-600 dark:text-slate-300">
                       {sale.paymentMethod.replace('_', '/')}
@@ -323,6 +370,45 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
               </button>
             </div>
 
+            {(selectedSale.employeeName ||
+              selectedSale.customerName ||
+              selectedSale.customerPhone ||
+              selectedSale.customerAddress ||
+              selectedSale.tableNumber) && (
+              <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/50 p-3 text-xs space-y-1 text-slate-700 dark:text-slate-300">
+                {selectedSale.employeeName && (
+                  <div>
+                    <span className="text-slate-500">Handled By (Staff):</span>{' '}
+                    <strong className="text-slate-900 dark:text-slate-100">
+                      {selectedSale.employeeName}
+                    </strong>
+                  </div>
+                )}
+                {selectedSale.tableNumber && (
+                  <div>
+                    <span className="text-slate-500">Table:</span> Table {selectedSale.tableNumber}
+                  </div>
+                )}
+                {selectedSale.customerName && (
+                  <div>
+                    <span className="text-slate-500">Customer:</span> {selectedSale.customerName}
+                  </div>
+                )}
+                {selectedSale.customerPhone && (
+                  <div>
+                    <span className="text-slate-500">Phone:</span>{' '}
+                    <span className="font-mono">{selectedSale.customerPhone}</span>
+                  </div>
+                )}
+                {selectedSale.customerAddress && (
+                  <div>
+                    <span className="text-slate-500">Delivery Address:</span>{' '}
+                    {selectedSale.customerAddress}
+                  </div>
+                )}
+              </div>
+            )}
+
             <div className="border-y border-slate-200 dark:border-slate-800 divide-y divide-slate-100 dark:divide-slate-800 text-xs">
               {selectedSale.items.map((item, idx) => (
                 <div key={`${item.productId}-${idx}`} className="py-2.5 flex justify-between gap-2">
@@ -346,19 +432,17 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
                   {formatMoney(selectedSale.subtotal, store.currency)}
                 </span>
               </div>
+              <div className="flex justify-between text-slate-600 dark:text-slate-400">
+                <span>Tax ({selectedSale.taxRate ?? 0}%)</span>
+                <span className="font-mono tabular-nums">
+                  {formatMoney(selectedSale.taxAmount ?? 0, store.currency)}
+                </span>
+              </div>
               {selectedSale.discount > 0 && (
                 <div className="flex justify-between text-slate-600 dark:text-slate-400">
                   <span>Discount</span>
                   <span className="font-mono tabular-nums">
                     -{formatMoney(selectedSale.discount, store.currency)}
-                  </span>
-                </div>
-              )}
-              {selectedSale.taxAmount > 0 && (
-                <div className="flex justify-between text-slate-600 dark:text-slate-400">
-                  <span>Tax ({selectedSale.taxRate}%)</span>
-                  <span className="font-mono tabular-nums">
-                    {formatMoney(selectedSale.taxAmount, store.currency)}
                   </span>
                 </div>
               )}
@@ -368,6 +452,22 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
                   {formatMoney(selectedSale.total, store.currency)}
                 </span>
               </div>
+              {selectedSale.paymentMethod === 'cash' && (
+                <div className="pt-1.5 space-y-1 border-t border-dashed border-slate-200 dark:border-slate-800">
+                  <div className="flex justify-between text-slate-600 dark:text-slate-400">
+                    <span>Cash Received</span>
+                    <span className="font-mono tabular-nums">
+                      {formatMoney(selectedSale.amountTendered, store.currency)}
+                    </span>
+                  </div>
+                  <div className="flex justify-between font-semibold text-emerald-700 dark:text-emerald-400">
+                    <span>Change / Return</span>
+                    <span className="font-mono tabular-nums">
+                      {formatMoney(selectedSale.changeDue ?? 0, store.currency)}
+                    </span>
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="flex flex-wrap items-center justify-between gap-2 pt-2">

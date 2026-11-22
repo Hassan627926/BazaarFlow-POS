@@ -8,9 +8,11 @@ export type StockReason = 'restock' | 'sale' | 'void_restore' | 'damage' | 'adju
 
 export type AppTab =
   | 'billing'
+  | 'waiter'
   | 'inventory'
   | 'barcodes'
   | 'sales'
+  | 'employees'
   | 'analytics'
   | 'settings';
 
@@ -19,7 +21,10 @@ export const BLUEPRINT_LIMITS = {
   LOGO_DATA_URL_MAX: 120000,
   CURRENCY_MAX: 10,
   TAX_RATE_MAX: 50,
+  TABLE_COUNT_DEFAULT: 12,
+  TABLE_COUNT_MAX: 60,
   ADDRESS_MAX: 200,
+  CUSTOMER_ADDRESS_MAX: 220,
   PHONE_MAX: 32,
   RECEIPT_FOOTER_MAX: 180,
   PRODUCT_NAME_MAX: 100,
@@ -30,6 +35,12 @@ export const BLUEPRINT_LIMITS = {
   INVOICE_MAX: 40,
   TABLE_MAX: 20,
   CUSTOMER_NAME_MAX: 80,
+  EMPLOYEE_NAME_MAX: 80,
+  EMPLOYEE_ROLE_MAX: 40,
+  EMPLOYEE_CNIC_MAX: 32,
+  EMPLOYEE_SHIFT_MAX: 40,
+  EMPLOYEE_NOTES_MAX: 160,
+  EMPLOYEE_EMAIL_MAX: 120,
   STOCK_NOTE_MAX: 160,
   SALE_ITEMS_MAX: 100,
   HEX_COLOR_REGEX: /^#[0-9a-fA-F]{6}$/,
@@ -46,6 +57,7 @@ export interface StoreConfig {
   accentColor: string;
   currency: string;
   taxRate: number;
+  tableCount?: number;
   address: string;
   phone: string;
   receiptFooter: string;
@@ -103,6 +115,10 @@ export interface Sale {
   orderType: OrderType;
   tableNumber: string;
   customerName: string;
+  customerPhone?: string;
+  customerAddress?: string;
+  employeeId?: string;
+  employeeName?: string;
   status: SaleStatus;
   createdAt?: Timestamp | null;
   updatedAt?: Timestamp | null;
@@ -122,6 +138,67 @@ export interface StockLog {
   createdAt?: Timestamp | null;
 }
 
+export interface TableSession {
+  id: string;
+  ownerId: string;
+  storeId: string;
+  tableNumber: string;
+  status: 'occupied';
+  items: SaleItem[];
+  itemCount: number;
+  subtotal: number;
+  totalCost: number;
+  customerName: string;
+  employeeId?: string;
+  employeeName?: string;
+  createdAt?: Timestamp | null;
+  updatedAt?: Timestamp | null;
+}
+
+export interface Customer {
+  id: string;
+  ownerId: string;
+  storeId: string;
+  name: string;
+  phone: string;
+  phoneDigits: string;
+  address: string;
+  orderCount: number;
+  createdAt?: Timestamp | null;
+  updatedAt?: Timestamp | null;
+}
+
+export interface Employee {
+  id: string;
+  ownerId: string;
+  storeId: string;
+  name: string;
+  role: string;
+  phone: string;
+  cnic: string;
+  shift: string;
+  notes: string;
+  loginEmail?: string;
+  mobileAccess?: boolean;
+  active: boolean;
+  createdAt?: Timestamp | null;
+  updatedAt?: Timestamp | null;
+}
+
+export interface WaiterAccess {
+  id: string;
+  ownerId: string;
+  storeId: string;
+  storeName: string;
+  employeeId: string;
+  employeeName: string;
+  role: string;
+  waiterEmail: string;
+  active: boolean;
+  createdAt?: Timestamp | null;
+  updatedAt?: Timestamp | null;
+}
+
 export interface CartItem {
   product: Product;
   quantity: number;
@@ -134,6 +211,6 @@ export interface BarcodeLabelPrintItem {
 
 export type PrintJob =
   | { type: 'receipt'; sale: Sale }
-  | { type: 'kot'; sale: Sale }
+  | { type: 'kot'; sale: Sale; isAddOn?: boolean; isRevised?: boolean; changeNotes?: string[] }
   | { type: 'barcodes'; labels: BarcodeLabelPrintItem[] }
   | { type: 'daily_report'; dateKey: string; sales: Sale[]; products: Product[] };

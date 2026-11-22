@@ -1,12 +1,12 @@
 {
-  "projectId": "gen-lang-client-0319814922",
-  "appId": "1:57578055863:web:c04787757d2f33000ac532",
-  "apiKey": "AIzaSyBMNz0yRhWUKqjDMSdJ4MeLpuxyv0CyhEU",
-  "authDomain": "gen-lang-client-0319814922.firebaseapp.com",
-  "firestoreDatabaseId": "ai-studio-45b609a7-b12c-4b66-a28a-7553f78ec893",
-  "storageBucket": "gen-lang-client-0319814922.firebasestorage.app",
-  "messagingSenderId": "57578055863",
-  "measurementId": "",
-  "oAuthClientId": "57578055863-0l8639jpge5nakq05i7ebljfb9lrists.apps.googleusercontent.com",
+  "projectId": "bazaarflow-pos",
+  "appId": "1:183862236076:web:d50674fa8d4a6ef473a009",
+  "apiKey": "AIzaSyA5FrG6xbCIm5ofE47gipXF4olDw0f4Yrg",
+  "authDomain": "bazaarflow-pos.firebaseapp.com",
+  "firestoreDatabaseId": "(default)",
+  "storageBucket": "bazaarflow-pos.firebasestorage.app",
+  "messagingSenderId": "183862236076",
+  "measurementId": "G-0D9KRPJKLS",
+  "oAuthClientId": "",
   "recaptchaSiteKey": ""
 }
