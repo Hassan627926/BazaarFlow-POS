@@ -390,6 +390,7 @@
         "employeeName": { "type": "string", "maxLength": 80 },
         "source": { "type": "string", "enum": ["waiter_mobile", "counter"] },
         "status": { "type": "string", "enum": ["pending", "printed"] },
+        "kitchenStatus": { "type": "string", "enum": ["preparing", "ready", "served"] },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },

@@ -375,7 +375,8 @@ service cloud.firestore {
         data.keys().hasOnly([
           'ownerId', 'storeId', 'ticketNumber', 'tableNumber', 'orderType',
           'ticketKind', 'items', 'itemCount', 'changeNotes', 'customerName',
-          'employeeId', 'employeeName', 'source', 'status', 'createdAt', 'updatedAt'
+          'employeeId', 'employeeName', 'source', 'status', 'kitchenStatus',
+          'createdAt', 'updatedAt'
         ]) &&
         isValidId(data.ownerId) &&
         isValidId(data.storeId) &&
@@ -392,6 +393,7 @@ service cloud.firestore {
         (!('employeeName' in data) || (data.employeeName is string && data.employeeName.size() <= 80)) &&
         data.source in ['waiter_mobile', 'counter'] &&
         data.status in ['pending', 'printed'] &&
+        (!('kitchenStatus' in data) || data.kitchenStatus in ['preparing', 'ready', 'served']) &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
     }
@@ -855,14 +857,19 @@ service cloud.firestore {
           isValidId(storeId) &&
           isValidId(kotId) &&
           isValidKotTicket(incoming(), storeId) &&
-          incoming().status == 'pending' &&
+          (!('kitchenStatus' in incoming()) || incoming().kitchenStatus == 'preparing') &&
           incoming().createdAt == request.time &&
           incoming().updatedAt == request.time && (
-            (incoming().ownerId == request.auth.uid && isStoreOwner(storeId)) ||
+            (
+              incoming().ownerId == request.auth.uid &&
+              isStoreOwner(storeId) &&
+              incoming().status in ['pending', 'printed']
+            ) ||
             (
               isActiveWaiter(storeId) &&
               isRestaurantStore(storeId) &&
-              incoming().ownerId == storeOwnerId(storeId)
+              incoming().ownerId == storeOwnerId(storeId) &&
+              incoming().status == 'pending'
             )
           );
 
@@ -870,13 +877,34 @@ service cloud.firestore {
           isValidId(storeId) &&
           isValidId(kotId) &&
           isValidKotTicket(incoming(), storeId) &&
-          existing().ownerId == request.auth.uid &&
           incoming().ownerId == existing().ownerId &&
           incoming().storeId == existing().storeId &&
           incoming().createdAt == existing().createdAt &&
-          incoming().updatedAt == request.time &&
-          isStoreOwner(storeId) &&
-          incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']);
+          incoming().updatedAt == request.time && (
+            // Tier 1 (Owner / Kitchen Station): Update print status, kitchen status, or table shift
+            (
+              existing().ownerId == request.auth.uid &&
+              isStoreOwner(storeId) && (
+                incoming().diff(existing()).affectedKeys().hasOnly(['status', 'kitchenStatus', 'updatedAt']) ||
+                incoming().diff(existing()).affectedKeys().hasOnly(['tableNumber', 'updatedAt'])
+              )
+            ) ||
+            // Tier 2 (Active Waiter): Mark order served or update table number on table shift/merge
+            (
+              isActiveWaiter(storeId) &&
+              isRestaurantStore(storeId) && (
+                (
+                  'kitchenStatus' in incoming() &&
+                  incoming().kitchenStatus == 'served' &&
+                  incoming().diff(existing()).affectedKeys().hasOnly(['kitchenStatus', 'updatedAt'])
+                ) ||
+                (
+                  waiterCanEditOrders(storeId) &&
+                  incoming().diff(existing()).affectedKeys().hasOnly(['tableNumber', 'updatedAt'])
+                )
+              )
+            )
+          );
 
         allow delete: if isAuthenticatedUser() &&
           isValidId(storeId) &&

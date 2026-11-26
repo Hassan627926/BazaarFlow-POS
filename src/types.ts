@@ -228,6 +228,7 @@ export interface WaiterAccess {
 
 export type KotTicketKind = 'new' | 'addon' | 'revised' | 'reprint';
 export type KotTicketStatus = 'pending' | 'printed';
+export type KotKitchenStatus = 'preparing' | 'ready' | 'served';
 
 export interface KotTicket {
   id: string;
@@ -245,6 +246,7 @@ export interface KotTicket {
   employeeName?: string;
   source: 'waiter_mobile' | 'counter';
   status: KotTicketStatus;
+  kitchenStatus?: KotKitchenStatus;
   createdAt?: Timestamp | null;
   updatedAt?: Timestamp | null;
 }

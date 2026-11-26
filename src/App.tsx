@@ -40,6 +40,7 @@ import {
   type AppTab,
   type Customer,
   type Employee,
+  type KotKitchenStatus,
   type KotTicket,
   type PrintJob,
   type Product,
@@ -60,6 +61,8 @@ import {
   initKitchenAudioUnlock,
   playBillClearedChime,
   playKitchenBellChime,
+  playOrderReadyChime,
+  triggerReadyVibration,
 } from './utils/soundAlert';
 import { AnalyticsView } from './components/AnalyticsView';
 import { AuthScreen } from './components/AuthScreen';
@@ -120,10 +123,17 @@ function POSWorkspace() {
   const kotSoundEnabledRef = useRef(kotSoundEnabled);
   const kotHydratedRef = useRef(false);
   const seenPendingKotIdsRef = useRef<Set<string>>(new Set());
+  const ownerReadyHydratedRef = useRef(false);
+  const seenOwnerReadyKotIdsRef = useRef<Set<string>>(new Set());
   const autoDispatchedKotIdsRef = useRef<Set<string>>(new Set());
   const salesHydratedRef = useRef(false);
   const seenWaiterBillIdsRef = useRef<Set<string>>(new Set());
   const [recentWaiterBills, setRecentWaiterBills] = useState<Sale[]>([]);
+  const activeTabRef = useRef<AppTab>(activeTab);
+
+  useEffect(() => {
+    activeTabRef.current = activeTab;
+  }, [activeTab]);
 
   useEffect(() => {
     initKitchenAudioUnlock();
@@ -158,6 +168,9 @@ function POSWorkspace() {
   const [waiterStore, setWaiterStore] = useState<StoreConfig | null>(null);
   const [waiterProducts, setWaiterProducts] = useState<Product[]>([]);
   const [waiterTables, setWaiterTables] = useState<TableSession[]>([]);
+  const [waiterKotTickets, setWaiterKotTickets] = useState<KotTicket[]>([]);
+  const waiterKotHydratedRef = useRef(false);
+  const seenWaiterReadyKotIdsRef = useRef<Set<string>>(new Set());
 
   // Post-sign-in Create/Change Password modal state
   const [passwordModalOpen, setPasswordModalOpen] = useState(false);
@@ -267,6 +280,8 @@ function POSWorkspace() {
         setRecentWaiterBills([]);
         kotHydratedRef.current = false;
         seenPendingKotIdsRef.current.clear();
+        ownerReadyHydratedRef.current = false;
+        seenOwnerReadyKotIdsRef.current.clear();
         autoDispatchedKotIdsRef.current.clear();
         salesHydratedRef.current = false;
         seenWaiterBillIdsRef.current.clear();
@@ -277,6 +292,9 @@ function POSWorkspace() {
         setWaiterStore(null);
         setWaiterProducts([]);
         setWaiterTables([]);
+        setWaiterKotTickets([]);
+        waiterKotHydratedRef.current = false;
+        seenWaiterReadyKotIdsRef.current.clear();
       }
     });
     return () => unsub();
@@ -427,18 +445,25 @@ function POSWorkspace() {
     };
   }, [isStandaloneWaiterMode, user, activeWaiterGrant]);
 
-  // Subscribe to store, menu products, and live tables in standalone Waiter Mobile Mode
+  // Subscribe to store, menu products, live tables, and kitchen KOT status in standalone Waiter Mobile Mode
   useEffect(() => {
     if (!isStandaloneWaiterMode || !waiterMemberReady || !activeWaiterGrant) {
       setWaiterStore(null);
       setWaiterProducts([]);
       setWaiterTables([]);
+      setWaiterKotTickets([]);
+      waiterKotHydratedRef.current = false;
+      seenWaiterReadyKotIdsRef.current.clear();
       return;
     }
 
     const storeId = activeWaiterGrant.storeId;
     const productsPath = `stores/${storeId}/products`;
     const tablesPath = `stores/${storeId}/tables`;
+    const kotQueuePath = `stores/${storeId}/kotQueue`;
+
+    waiterKotHydratedRef.current = false;
+    seenWaiterReadyKotIdsRef.current.clear();
 
     const unsubStore = onSnapshot(
       doc(db, 'stores', storeId),
@@ -496,10 +521,50 @@ function POSWorkspace() {
       }
     );
 
+    const unsubKotQueue = onSnapshot(
+      query(collection(db, kotQueuePath), where('storeId', '==', storeId)),
+      (snap) => {
+        const list: KotTicket[] = snap.docs.map((d) => ({
+          id: d.id,
+          ...(d.data() as Omit<KotTicket, 'id'>),
+        }));
+        setWaiterKotTickets(list);
+
+        const readyIds = new Set(
+          list
+            .filter((t) => t.ticketKind !== 'reprint' && t.kitchenStatus === 'ready')
+            .map((t) => t.id)
+        );
+        if (!waiterKotHydratedRef.current) {
+          seenWaiterReadyKotIdsRef.current = readyIds;
+          waiterKotHydratedRef.current = true;
+        } else {
+          let hasNewReady = false;
+          for (const id of readyIds) {
+            if (!seenWaiterReadyKotIdsRef.current.has(id)) {
+              hasNewReady = true;
+              break;
+            }
+          }
+          seenWaiterReadyKotIdsRef.current = readyIds;
+          if (hasNewReady) {
+            if (kotSoundEnabledRef.current) {
+              void playOrderReadyChime();
+            }
+            triggerReadyVibration();
+          }
+        }
+      },
+      () => {
+        setWaiterKotTickets([]);
+      }
+    );
+
     return () => {
       unsubStore();
       unsubProducts();
       unsubTables();
+      unsubKotQueue();
     };
   }, [isStandaloneWaiterMode, waiterMemberReady, activeWaiterGrant]);
 
@@ -539,6 +604,8 @@ function POSWorkspace() {
       setRecentWaiterBills([]);
       kotHydratedRef.current = false;
       seenPendingKotIdsRef.current.clear();
+      ownerReadyHydratedRef.current = false;
+      seenOwnerReadyKotIdsRef.current.clear();
       autoDispatchedKotIdsRef.current.clear();
       salesHydratedRef.current = false;
       seenWaiterBillIdsRef.current.clear();
@@ -547,6 +614,8 @@ function POSWorkspace() {
 
     kotHydratedRef.current = false;
     seenPendingKotIdsRef.current.clear();
+    ownerReadyHydratedRef.current = false;
+    seenOwnerReadyKotIdsRef.current.clear();
     autoDispatchedKotIdsRef.current.clear();
     salesHydratedRef.current = false;
     seenWaiterBillIdsRef.current.clear();
@@ -693,6 +762,28 @@ function POSWorkspace() {
             void playKitchenBellChime();
           }
         }
+
+        const ownerReadyIds = new Set(
+          list
+            .filter((t) => t.ticketKind !== 'reprint' && t.kitchenStatus === 'ready')
+            .map((t) => t.id)
+        );
+        if (!ownerReadyHydratedRef.current) {
+          seenOwnerReadyKotIdsRef.current = ownerReadyIds;
+          ownerReadyHydratedRef.current = true;
+        } else {
+          let hasNewReady = false;
+          for (const id of ownerReadyIds) {
+            if (!seenOwnerReadyKotIdsRef.current.has(id)) {
+              hasNewReady = true;
+              break;
+            }
+          }
+          seenOwnerReadyKotIdsRef.current = ownerReadyIds;
+          if (hasNewReady && kotSoundEnabledRef.current && activeTabRef.current !== 'kot_queue') {
+            void playOrderReadyChime();
+          }
+        }
       },
       (err) => reportSnapshotError(err, OperationType.LIST, kotQueuePath)
     );
@@ -712,6 +803,12 @@ function POSWorkspace() {
     return kotTickets
       .filter((t) => t.status === 'pending')
       .sort((a, b) => (a.createdAt?.toMillis?.() ?? 0) - (b.createdAt?.toMillis?.() ?? 0));
+  }, [kotTickets]);
+
+  const readyKotTickets = useMemo(() => {
+    return kotTickets.filter(
+      (t) => t.ticketKind !== 'reprint' && t.kitchenStatus === 'ready'
+    );
   }, [kotTickets]);
 
   const buildPrintJobFromKot = useCallback(
@@ -774,14 +871,42 @@ function POSWorkspace() {
     [activeStoreId]
   );
 
+  const handleUpdateKotKitchenStatus = useCallback(
+    async (
+      targetStoreId: string,
+      kotId: string,
+      nextStatus: KotKitchenStatus,
+      rethrowOnError = false
+    ) => {
+      if (!targetStoreId || !kotId) return;
+      const path = `stores/${targetStoreId}/kotQueue/${kotId}`;
+      try {
+        await updateDoc(doc(db, 'stores', targetStoreId, 'kotQueue', kotId), {
+          kitchenStatus: nextStatus,
+          updatedAt: serverTimestamp(),
+        });
+      } catch (err) {
+        if (rethrowOnError) {
+          throw err instanceof Error ? err : new Error('Unable to update kitchen order status.');
+        }
+        reportSnapshotError(err, OperationType.UPDATE, path);
+      }
+    },
+    []
+  );
+
   const handleClearPrintedKots = useCallback(async () => {
     if (!activeStoreId) return;
-    const printed = kotTickets.filter((t) => t.status === 'printed');
-    if (printed.length === 0) return;
+    const clearable = kotTickets.filter(
+      (t) =>
+        t.status === 'printed' &&
+        (t.kitchenStatus === 'served' || t.ticketKind === 'reprint')
+    );
+    if (clearable.length === 0) return;
     const path = `stores/${activeStoreId}/kotQueue`;
     try {
       const batch = writeBatch(db);
-      printed.slice(0, 400).forEach((ticket) => {
+      clearable.slice(0, 400).forEach((ticket) => {
         batch.delete(doc(db, 'stores', activeStoreId, 'kotQueue', ticket.id));
       });
       await batch.commit();
@@ -981,6 +1106,7 @@ function POSWorkspace() {
           store={waiterStore}
           products={waiterProducts}
           tableSessions={waiterTables}
+          kotTickets={waiterKotTickets}
           waiterGrant={activeWaiterGrant}
           darkMode={darkMode}
           onToggleDarkMode={() => setDarkMode((v) => !v)}
@@ -998,6 +1124,9 @@ function POSWorkspace() {
           hasPassword={hasPasswordProvider}
           onOpenPasswordSetup={() => setPasswordModalOpen(true)}
           onPrintJob={setPrintJob}
+          onUpdateKitchenStatus={(kotId, nextStatus) =>
+            handleUpdateKotKitchenStatus(waiterStore.id, kotId, nextStatus, true)
+          }
         />
         <PasswordSetupModal
           user={user}
@@ -1074,9 +1203,9 @@ function POSWorkspace() {
           { id: 'waiter' as const, label: 'Waiter Order & KOT', icon: Smartphone },
           {
             id: 'kot_queue' as const,
-            label: 'Kitchen KOT Queue',
+            label: 'Kitchen Display & KOT',
             icon: Printer,
-            badge: pendingKotTickets.length,
+            badge: pendingKotTickets.length + readyKotTickets.length,
           },
         ]
       : []),
@@ -1322,6 +1451,16 @@ function POSWorkspace() {
                 <span>{recentWaiterBills.length} Bill Cleared</span>
               </button>
             )}
+            {!isRetail && activeStore && readyKotTickets.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setActiveTab('kot_queue')}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-300 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950/50 px-3 py-1.5 text-xs font-semibold text-emerald-800 dark:text-emerald-300 hover:bg-emerald-100 dark:hover:bg-emerald-950/80 whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                <Bell className="w-3.5 h-3.5" />
+                <span>{readyKotTickets.length} Ready to Serve</span>
+              </button>
+            )}
             {!isRetail && activeStore && pendingKotTickets.length > 0 && (
               <button
                 type="button"
@@ -1492,10 +1631,14 @@ function POSWorkspace() {
                   store={activeStore}
                   products={products}
                   tableSessions={tableSessions}
+                  kotTickets={kotTickets}
                   customers={customers}
                   employees={employees}
                   ownerId={user.uid}
                   onPrintJob={setPrintJob}
+                  onUpdateKitchenStatus={(kotId, nextStatus) =>
+                    handleUpdateKotKitchenStatus(activeStore.id, kotId, nextStatus, true)
+                  }
                   onGoToInventory={() => setActiveTab('inventory')}
                   onGoToEmployees={() => setActiveTab('employees')}
                 />
@@ -1505,8 +1648,12 @@ function POSWorkspace() {
                   store={activeStore}
                   products={products}
                   tableSessions={tableSessions}
+                  kotTickets={kotTickets}
                   employees={employees}
                   onPrintJob={setPrintJob}
+                  onUpdateKitchenStatus={(kotId, nextStatus) =>
+                    handleUpdateKotKitchenStatus(activeStore.id, kotId, nextStatus, true)
+                  }
                 />
               )}
               {activeTab === 'kot_queue' && !isRetail && (
@@ -1519,6 +1666,9 @@ function POSWorkspace() {
                   onToggleAutoPrint={() => setKotAutoPrint((v) => !v)}
                   onPrintTicket={handlePrintKotTicket}
                   onMarkPrinted={handleMarkKotPrinted}
+                  onUpdateKitchenStatus={(kotId, nextStatus) =>
+                    handleUpdateKotKitchenStatus(activeStore.id, kotId, nextStatus, false)
+                  }
                   onClearPrinted={handleClearPrintedKots}
                   onTestBell={playKitchenBellChime}
                 />

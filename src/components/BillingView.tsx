@@ -3,7 +3,10 @@ import {
   ArrowRightLeft,
   Banknote,
   Barcode,
+  Bell,
   Check,
+  CheckCheck,
+  ChefHat,
   CreditCard,
   Edit3,
   MapPin,
@@ -29,6 +32,8 @@ import {
   type CartItem,
   type Customer,
   type Employee,
+  type KotKitchenStatus,
+  type KotTicket,
   type OrderType,
   type PaymentMethod,
   type PrintJob,
@@ -54,10 +59,12 @@ interface BillingViewProps {
   store: StoreConfig;
   products: Product[];
   tableSessions: TableSession[];
+  kotTickets?: KotTicket[];
   customers: Customer[];
   employees: Employee[];
   ownerId: string;
   onPrintJob: (job: PrintJob) => void;
+  onUpdateKitchenStatus?: (kotId: string, nextStatus: KotKitchenStatus) => Promise<void>;
   onGoToInventory: () => void;
   onGoToEmployees: () => void;
 }
@@ -132,10 +139,12 @@ export const BillingView: React.FC<BillingViewProps> = ({
   store,
   products,
   tableSessions,
+  kotTickets = [],
   customers,
   employees,
   ownerId,
   onPrintJob,
+  onUpdateKitchenStatus,
   onGoToInventory,
   onGoToEmployees,
 }) => {
@@ -210,6 +219,37 @@ export const BillingView: React.FC<BillingViewProps> = ({
     if (isRetail || orderType !== 'dine_in' || !tableNumber) return null;
     return tableSessionMap.get(tableNumber) ?? null;
   }, [isRetail, orderType, tableNumber, tableSessionMap]);
+
+  const tableKitchenStatusMap = useMemo(() => {
+    const map = new Map<string, KotKitchenStatus>();
+    kotTickets.forEach((t) => {
+      if (!t.tableNumber || t.ticketKind === 'reprint') return;
+      if (!tableSessionMap.has(t.tableNumber)) return;
+      const kStatus: KotKitchenStatus =
+        t.kitchenStatus === 'ready' || t.kitchenStatus === 'served' ? t.kitchenStatus : 'preparing';
+      const current = map.get(t.tableNumber);
+      if (kStatus === 'ready') {
+        map.set(t.tableNumber, 'ready');
+      } else if (kStatus === 'preparing' && current !== 'ready') {
+        map.set(t.tableNumber, 'preparing');
+      } else if (!current) {
+        map.set(t.tableNumber, kStatus);
+      }
+    });
+    return map;
+  }, [kotTickets, tableSessionMap]);
+
+  const activeTableKots = useMemo(() => {
+    if (!activeTableSession) return [];
+    return kotTickets
+      .filter(
+        (t) =>
+          t.tableNumber === activeTableSession.tableNumber &&
+          t.ticketKind !== 'reprint' &&
+          t.kitchenStatus !== 'served'
+      )
+      .sort((a, b) => (a.createdAt?.toMillis?.() ?? 0) - (b.createdAt?.toMillis?.() ?? 0));
+  }, [kotTickets, activeTableSession]);
 
   const activeEmployees = useMemo(() => employees.filter((e) => e.active), [employees]);
 
@@ -1058,16 +1098,39 @@ export const BillingView: React.FC<BillingViewProps> = ({
         });
       });
 
+      const kotId = generateSafeId('kot');
+      const ticketNumber = `KOT-T${tableNumber}-${String(Date.now()).slice(-4)}`;
+      const kotItemCount = cartSaleItems.reduce((a, i) => a + i.quantity, 0);
+
+      batch.set(doc(db, 'stores', store.id, 'kotQueue', kotId), {
+        ownerId,
+        storeId: store.id,
+        ticketNumber,
+        tableNumber,
+        orderType: 'dine_in',
+        ticketKind: isAddOn ? 'addon' : 'new',
+        items: cartSaleItems,
+        itemCount: kotItemCount,
+        customerName: cleanGuest,
+        employeeId: finalEmpId,
+        employeeName: finalEmpName,
+        source: 'counter',
+        status: 'printed',
+        kitchenStatus: 'preparing',
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+
       await batch.commit();
 
       const kotSalePreview: Sale = {
-        id: `kot_${Date.now()}`,
+        id: kotId,
         ownerId,
         storeId: store.id,
-        invoiceNumber: `KOT-T${tableNumber}`,
+        invoiceNumber: ticketNumber,
         dateKey: getTodayDateKey(),
         items: cartSaleItems,
-        itemCount: cartSaleItems.reduce((a, i) => a + i.quantity, 0),
+        itemCount: kotItemCount,
         subtotal: cartSaleItems.reduce((a, i) => a + i.lineTotal, 0),
         discount: 0,
         taxRate: 0,
@@ -1095,7 +1158,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
           ? `Add-on added to Table ${tableNumber} — ready to print Add-On KOT.`
           : `Table ${tableNumber} is now Occupied — KOT generated.`
       );
-      onPrintJob({ type: 'kot', sale: kotSalePreview, isAddOn });
+      onPrintJob({ type: 'kot', sale: kotSalePreview, isAddOn, kotId });
     } catch (err) {
       handleFirestoreError(err, isAddOn ? OperationType.UPDATE : OperationType.CREATE, tablePath);
     } finally {
@@ -1212,10 +1275,26 @@ export const BillingView: React.FC<BillingViewProps> = ({
         })
       );
 
+      const revKotId = printRevisedKot && !isCancellingTable ? generateSafeId('kot') : '';
+      const revTicketNumber = `KOT-REV-T${tableNum}-${String(Date.now()).slice(-4)}`;
+      const sanitizedCount = sanitizedItems.reduce((acc, i) => acc + i.quantity, 0);
+
       if (isCancellingTable) {
         batch.delete(tableRef);
+        kotTickets
+          .filter(
+            (t) =>
+              t.tableNumber === tableNum &&
+              t.ticketKind !== 'reprint' &&
+              t.kitchenStatus !== 'served'
+          )
+          .forEach((t) => {
+            batch.update(doc(db, 'stores', store.id, 'kotQueue', t.id), {
+              kitchenStatus: 'served',
+              updatedAt: serverTimestamp(),
+            });
+          });
       } else {
-        const nextCount = sanitizedItems.reduce((acc, i) => acc + i.quantity, 0);
         const nextSubtotal = Number(
           sanitizedItems.reduce((acc, i) => acc + i.lineTotal, 0).toFixed(2)
         );
@@ -1225,7 +1304,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
 
         batch.update(tableRef, {
           items: sanitizedItems,
-          itemCount: nextCount,
+          itemCount: sanitizedCount,
           subtotal: nextSubtotal,
           totalCost: nextCost,
           customerName: cleanGuest,
@@ -1233,6 +1312,28 @@ export const BillingView: React.FC<BillingViewProps> = ({
           employeeName: finalEmpName,
           updatedAt: serverTimestamp(),
         });
+
+        if (revKotId) {
+          batch.set(doc(db, 'stores', store.id, 'kotQueue', revKotId), {
+            ownerId,
+            storeId: store.id,
+            ticketNumber: revTicketNumber,
+            tableNumber: tableNum,
+            orderType: 'dine_in',
+            ticketKind: 'revised',
+            items: sanitizedItems,
+            itemCount: sanitizedCount,
+            changeNotes: changeNotes.slice(0, 50),
+            customerName: cleanGuest,
+            employeeId: finalEmpId,
+            employeeName: finalEmpName,
+            source: 'counter',
+            status: 'printed',
+            kitchenStatus: 'preparing',
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+        }
       }
 
       await batch.commit();
@@ -1240,13 +1341,13 @@ export const BillingView: React.FC<BillingViewProps> = ({
       const revisedKotPreview: Sale | null =
         printRevisedKot && !isCancellingTable
           ? {
-              id: `kot_rev_${Date.now()}`,
+              id: revKotId || `kot_rev_${Date.now()}`,
               ownerId,
               storeId: store.id,
-              invoiceNumber: `KOT-REV-T${tableNum}`,
+              invoiceNumber: revTicketNumber,
               dateKey: getTodayDateKey(),
               items: sanitizedItems,
-              itemCount: sanitizedItems.reduce((a, i) => a + i.quantity, 0),
+              itemCount: sanitizedCount,
               subtotal: sanitizedItems.reduce((a, i) => a + i.lineTotal, 0),
               discount: 0,
               taxRate: 0,
@@ -1282,6 +1383,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
           sale: revisedKotPreview,
           isRevised: true,
           changeNotes,
+          kotId: revKotId || undefined,
         });
       }
     } catch (err) {
@@ -1419,6 +1521,54 @@ export const BillingView: React.FC<BillingViewProps> = ({
       }
 
       batch.delete(doc(db, 'stores', store.id, 'tables', sourceSession.id));
+
+      // Keep active kitchen tickets synced with the shifted/merged table number
+      kotTickets
+        .filter(
+          (t) =>
+            t.tableNumber === sourceSession.tableNumber &&
+            t.ticketKind !== 'reprint' &&
+            t.kitchenStatus !== 'served'
+        )
+        .forEach((t) => {
+          batch.update(doc(db, 'stores', store.id, 'kotQueue', t.id), {
+            tableNumber: targetTable,
+            updatedAt: serverTimestamp(),
+          });
+        });
+
+      const shiftChangeNotes = [
+        isMerge
+          ? `MERGED: Table ${sourceSession.tableNumber} + Table ${targetTable} → Table ${targetTable}`
+          : `SHIFTED: Table ${sourceSession.tableNumber} → Table ${targetTable}`,
+      ];
+      const shiftKotId = transferNotifyKot ? generateSafeId('kot') : '';
+      const shiftTicketNumber = `${isMerge ? 'KOT-MRG' : 'KOT-SHF'}-T${targetTable}-${String(
+        Date.now()
+      ).slice(-4)}`;
+
+      if (shiftKotId) {
+        batch.set(doc(db, 'stores', store.id, 'kotQueue', shiftKotId), {
+          ownerId,
+          storeId: store.id,
+          ticketNumber: shiftTicketNumber,
+          tableNumber: targetTable,
+          orderType: 'dine_in',
+          ticketKind: 'revised',
+          items: finalItems,
+          itemCount: finalCount,
+          changeNotes: shiftChangeNotes,
+          customerName: combinedCustomerName,
+          employeeId: finalEmpId,
+          employeeName: finalEmpName,
+          source: 'counter',
+          status: 'printed',
+          kitchenStatus: 'preparing',
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      }
+
       await batch.commit();
 
       setTransferModalOpen(false);
@@ -1433,16 +1583,11 @@ export const BillingView: React.FC<BillingViewProps> = ({
       );
 
       if (transferNotifyKot) {
-        const changeNotes = [
-          isMerge
-            ? `MERGED: Table ${sourceSession.tableNumber} + Table ${targetTable} → Table ${targetTable}`
-            : `SHIFTED: Table ${sourceSession.tableNumber} → Table ${targetTable}`,
-        ];
         const kotSalePreview: Sale = {
-          id: `kot_shift_${Date.now()}`,
+          id: shiftKotId || `kot_shift_${Date.now()}`,
           ownerId,
           storeId: store.id,
-          invoiceNumber: `${isMerge ? 'KOT-MRG' : 'KOT-SHF'}-T${targetTable}`,
+          invoiceNumber: shiftTicketNumber,
           dateKey: getTodayDateKey(),
           items: finalItems,
           itemCount: finalCount,
@@ -1469,7 +1614,8 @@ export const BillingView: React.FC<BillingViewProps> = ({
           type: 'kot',
           sale: kotSalePreview,
           isRevised: true,
-          changeNotes,
+          changeNotes: shiftChangeNotes,
+          kotId: shiftKotId || undefined,
         });
       }
     } catch (err) {
@@ -1632,9 +1778,22 @@ export const BillingView: React.FC<BillingViewProps> = ({
         });
       });
 
-      // If settling an occupied dine-in table, clear the table so it becomes Empty
+      // If settling an occupied dine-in table, clear the table and mark its kitchen KOTs served
       if (activeTableSession) {
         batch.delete(doc(db, 'stores', store.id, 'tables', activeTableSession.id));
+        kotTickets
+          .filter(
+            (t) =>
+              t.tableNumber === activeTableSession.tableNumber &&
+              t.ticketKind !== 'reprint' &&
+              t.kitchenStatus !== 'served'
+          )
+          .forEach((t) => {
+            batch.update(doc(db, 'stores', store.id, 'kotQueue', t.id), {
+              kitchenStatus: 'served',
+              updatedAt: serverTimestamp(),
+            });
+          });
       }
 
       // Save or update Customer history whenever phone & name are provided (especially Delivery & Takeaway)
@@ -2205,6 +2364,49 @@ export const BillingView: React.FC<BillingViewProps> = ({
           <>
             {activeTableSession && (
               <div className="py-3 border-b border-slate-200 dark:border-slate-800 space-y-2">
+                {activeTableKots.length > 0 && (
+                  <div className="space-y-1.5">
+                    {activeTableKots.map((kt) => {
+                      const isReady = kt.kitchenStatus === 'ready';
+                      return (
+                        <div
+                          key={kt.id}
+                          className={`rounded-lg border px-2.5 py-1.5 flex items-center justify-between gap-2 text-[11px] ${
+                            isReady
+                              ? 'border-emerald-400 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-950 dark:text-emerald-100'
+                              : 'border-orange-200 dark:border-orange-900/60 bg-orange-50/70 dark:bg-orange-950/25 text-orange-950 dark:text-orange-200'
+                          }`}
+                        >
+                          <span className="inline-flex items-center gap-1.5 font-semibold truncate">
+                            {isReady ? (
+                              <Bell className="w-3 h-3 text-emerald-600 shrink-0" />
+                            ) : (
+                              <ChefHat className="w-3 h-3 text-orange-600 shrink-0" />
+                            )}
+                            <span>{isReady ? 'Kitchen: Ready' : 'Kitchen: Preparing'}</span>
+                          </span>
+                          {onUpdateKitchenStatus && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                void onUpdateKitchenStatus(kt.id, isReady ? 'served' : 'ready')
+                              }
+                              className={`inline-flex items-center gap-1 rounded px-2 py-0.5 font-semibold text-white shrink-0 cursor-pointer ${
+                                isReady
+                                  ? 'bg-slate-900 dark:bg-slate-100 dark:text-slate-900'
+                                  : 'bg-emerald-600 hover:bg-emerald-700'
+                              }`}
+                            >
+                              <CheckCheck className="w-3 h-3" />
+                              <span>{isReady ? 'Served' : 'Mark Ready'}</span>
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
                 <div className="flex items-center justify-between gap-2">
                   <div className="min-w-0">
                     <div className="text-xs font-semibold text-slate-800 dark:text-slate-200 truncate">
@@ -2866,6 +3068,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
             </span>
             {tableSessions.map((session) => {
               const isSelected = orderType === 'dine_in' && tableNumber === session.tableNumber;
+              const kStatus = tableKitchenStatusMap.get(session.tableNumber);
               return (
                 <button
                   key={session.id}
@@ -2881,6 +3084,8 @@ export const BillingView: React.FC<BillingViewProps> = ({
                   className={`px-3 py-1.5 rounded-lg border text-xs font-medium whitespace-nowrap shrink-0 transition-colors cursor-pointer ${
                     isSelected
                       ? 'brand-border brand-soft-bg brand-text font-semibold'
+                      : kStatus === 'ready'
+                      ? 'border-emerald-400 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-900 dark:text-emerald-200 hover:bg-emerald-100 dark:hover:bg-emerald-950/60'
                       : 'border-amber-300 dark:border-amber-800 bg-amber-50/70 dark:bg-amber-950/30 text-amber-800 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-950/60'
                   }`}
                 >
@@ -2890,6 +3095,19 @@ export const BillingView: React.FC<BillingViewProps> = ({
                   <span className="font-mono tabular-nums">
                     {formatMoney(session.subtotal, store.currency)}
                   </span>
+                  {kStatus && (
+                    <span
+                      className={`ml-1.5 text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                        kStatus === 'ready'
+                          ? 'bg-emerald-600 text-white'
+                          : kStatus === 'preparing'
+                          ? 'bg-orange-200/80 text-orange-950 dark:bg-orange-900/70 dark:text-orange-200'
+                          : 'bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300'
+                      }`}
+                    >
+                      {kStatus === 'ready' ? 'Ready' : kStatus === 'preparing' ? 'Cooking' : 'Served'}
+                    </span>
+                  )}
                 </button>
               );
             })}

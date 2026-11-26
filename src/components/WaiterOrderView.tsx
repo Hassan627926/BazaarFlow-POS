@@ -3,7 +3,10 @@ import {
   ArrowLeft,
   ArrowRightLeft,
   Banknote,
+  Bell,
   Check,
+  CheckCheck,
+  ChefHat,
   CreditCard,
   Edit3,
   KeyRound,
@@ -30,6 +33,8 @@ import {
   BLUEPRINT_LIMITS,
   type CartItem,
   type Employee,
+  type KotKitchenStatus,
+  type KotTicket,
   type PaymentMethod,
   type PrintJob,
   type Product,
@@ -56,6 +61,7 @@ interface WaiterOrderViewProps {
   store: StoreConfig;
   products: Product[];
   tableSessions: TableSession[];
+  kotTickets?: KotTicket[];
   /** Present when logged in as a Waiter via Mobile Access grant */
   waiterGrant?: WaiterAccess | null;
   /** Present when previewed/used inside Owner Console on a tablet */
@@ -69,6 +75,7 @@ interface WaiterOrderViewProps {
   hasPassword?: boolean;
   onOpenPasswordSetup?: () => void;
   onPrintJob: (job: PrintJob) => void;
+  onUpdateKitchenStatus?: (kotId: string, nextStatus: KotKitchenStatus) => Promise<void>;
 }
 
 function buildCleanSaleItem(params: {
@@ -137,6 +144,7 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
   store,
   products,
   tableSessions,
+  kotTickets = [],
   waiterGrant,
   employees = [],
   standalone = false,
@@ -147,6 +155,7 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
   hasPassword = false,
   onOpenPasswordSetup,
   onPrintJob,
+  onUpdateKitchenStatus,
 }) => {
   const totalTables = Math.min(
     BLUEPRINT_LIMITS.TABLE_COUNT_MAX,
@@ -161,12 +170,13 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
   const activeEmployees = useMemo(() => employees.filter((e) => e.active), [employees]);
   const [ownerSelectedEmpId, setOwnerSelectedEmpId] = useState<string>('');
 
-  const [tableFilter, setTableFilter] = useState<'all' | 'empty' | 'occupied'>('all');
+  const [tableFilter, setTableFilter] = useState<'all' | 'empty' | 'occupied' | 'ready'>('all');
   const [selectedTable, setSelectedTable] = useState<string>('');
   const [guestName, setGuestName] = useState<string>('');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [selectedCategory, setSelectedCategory] = useState<string>('All');
   const [cart, setCart] = useState<CartItem[]>([]);
+  const [busyKotId, setBusyKotId] = useState<string | null>(null);
 
   const [editingOrder, setEditingOrder] = useState<boolean>(false);
   const [editItems, setEditItems] = useState<SaleItem[]>([]);
@@ -258,23 +268,81 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
     });
   }, [activeProducts, selectedCategory, searchQuery]);
 
+  const tableKitchenStatusMap = useMemo(() => {
+    const map = new Map<string, KotKitchenStatus>();
+    kotTickets.forEach((t) => {
+      if (!t.tableNumber || t.ticketKind === 'reprint') return;
+      if (!tableSessionMap.has(t.tableNumber)) return;
+      const kStatus: KotKitchenStatus =
+        t.kitchenStatus === 'ready' || t.kitchenStatus === 'served' ? t.kitchenStatus : 'preparing';
+      const current = map.get(t.tableNumber);
+      if (kStatus === 'ready') {
+        map.set(t.tableNumber, 'ready');
+      } else if (kStatus === 'preparing' && current !== 'ready') {
+        map.set(t.tableNumber, 'preparing');
+      } else if (!current) {
+        map.set(t.tableNumber, kStatus);
+      }
+    });
+    return map;
+  }, [kotTickets, tableSessionMap]);
+
+  const readyTickets = useMemo(() => {
+    const list = kotTickets.filter(
+      (t) =>
+        t.ticketKind !== 'reprint' &&
+        t.kitchenStatus === 'ready' &&
+        (!t.tableNumber || tableSessionMap.has(t.tableNumber))
+    );
+    return list.sort((a, b) => {
+      const aMine = effectiveWaiter.id && a.employeeId === effectiveWaiter.id ? 0 : 1;
+      const bMine = effectiveWaiter.id && b.employeeId === effectiveWaiter.id ? 0 : 1;
+      if (aMine !== bMine) return aMine - bMine;
+      return (a.updatedAt?.toMillis?.() ?? 0) - (b.updatedAt?.toMillis?.() ?? 0);
+    });
+  }, [kotTickets, tableSessionMap, effectiveWaiter.id]);
+
+  const selectedTableActiveTickets = useMemo(() => {
+    if (!selectedTable) return [];
+    return kotTickets
+      .filter(
+        (t) =>
+          t.tableNumber === selectedTable &&
+          t.ticketKind !== 'reprint' &&
+          t.kitchenStatus !== 'served'
+      )
+      .sort((a, b) => (a.createdAt?.toMillis?.() ?? 0) - (b.createdAt?.toMillis?.() ?? 0));
+  }, [kotTickets, selectedTable]);
+
   const tableStats = useMemo(() => {
     const occupied = tableSessions.length;
     const empty = Math.max(0, tableNumbersList.length - occupied);
     const mine = effectiveWaiter.id
       ? tableSessions.filter((t) => t.employeeId === effectiveWaiter.id).length
       : occupied;
-    return { occupied, empty, mine };
-  }, [tableSessions, tableNumbersList.length, effectiveWaiter.id]);
+    const ready = Array.from(tableKitchenStatusMap.values()).filter((s) => s === 'ready').length;
+    return { occupied, empty, mine, ready };
+  }, [tableSessions, tableNumbersList.length, effectiveWaiter.id, tableKitchenStatusMap]);
 
   const filteredTables = useMemo(() => {
     return tableNumbersList.filter((num) => {
       const occ = tableSessionMap.has(num);
       if (tableFilter === 'empty') return !occ;
       if (tableFilter === 'occupied') return occ;
+      if (tableFilter === 'ready') return occ && tableKitchenStatusMap.get(num) === 'ready';
       return true;
     });
-  }, [tableNumbersList, tableSessionMap, tableFilter]);
+  }, [tableNumbersList, tableSessionMap, tableFilter, tableKitchenStatusMap]);
+
+  const handleMarkKotServed = async (kotId: string) => {
+    if (!onUpdateKitchenStatus) return;
+    setBusyKotId(kotId);
+    try {
+      await onUpdateKitchenStatus(kotId, 'served');
+    } finally {
+      setBusyKotId(null);
+    }
+  };
 
   const cartSaleItems = useMemo<SaleItem[]>(
     () =>
@@ -476,6 +544,19 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
         updatedAt: serverTimestamp(),
       });
       batch.delete(doc(db, 'stores', store.id, 'tables', tableId));
+      kotTickets
+        .filter(
+          (t) =>
+            t.tableNumber === selectedTable &&
+            t.ticketKind !== 'reprint' &&
+            t.kitchenStatus !== 'served'
+        )
+        .forEach((t) => {
+          batch.update(doc(db, 'stores', store.id, 'kotQueue', t.id), {
+            kitchenStatus: 'served',
+            updatedAt: serverTimestamp(),
+          });
+        });
       await batch.commit();
 
       const receiptSale: Sale = {
@@ -1079,6 +1160,7 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
         employeeName: empName,
         source: waiterGrant ? 'waiter_mobile' : 'counter',
         status: 'pending',
+        kitchenStatus: 'preparing',
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
@@ -1248,6 +1330,19 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
 
       if (isCancelling) {
         batch.delete(tableRef);
+        kotTickets
+          .filter(
+            (t) =>
+              t.tableNumber === tableNum &&
+              t.ticketKind !== 'reprint' &&
+              t.kitchenStatus !== 'served'
+          )
+          .forEach((t) => {
+            batch.update(doc(db, 'stores', store.id, 'kotQueue', t.id), {
+              kitchenStatus: 'served',
+              updatedAt: serverTimestamp(),
+            });
+          });
       } else {
         batch.update(tableRef, {
           items: sanitizedItems,
@@ -1283,6 +1378,7 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
           employeeName: empName,
           source: waiterGrant ? 'waiter_mobile' : 'counter',
           status: 'pending',
+          kitchenStatus: 'preparing',
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
         });
@@ -1490,6 +1586,21 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
 
       batch.delete(doc(db, 'stores', store.id, 'tables', sourceSession.id));
 
+      // Keep active kitchen tickets synced with the shifted/merged table number
+      kotTickets
+        .filter(
+          (t) =>
+            t.tableNumber === sourceSession.tableNumber &&
+            t.ticketKind !== 'reprint' &&
+            t.kitchenStatus !== 'served'
+        )
+        .forEach((t) => {
+          batch.update(doc(db, 'stores', store.id, 'kotQueue', t.id), {
+            tableNumber: targetTable,
+            updatedAt: serverTimestamp(),
+          });
+        });
+
       const changeNotes = [
         isMerge
           ? `MERGED: Table ${sourceSession.tableNumber} + Table ${targetTable} -> Table ${targetTable}`
@@ -1514,6 +1625,7 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
           employeeName: empName,
           source: waiterGrant ? 'waiter_mobile' : 'counter',
           status: 'pending',
+          kitchenStatus: 'preparing',
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
         });
@@ -1664,6 +1776,69 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
         </div>
       )}
 
+      {/* LIVE KITCHEN READY ALERT BANNER */}
+      {readyTickets.length > 0 && (
+        <div className="space-y-2">
+          {readyTickets.slice(0, 4).map((rt) => {
+            const isMine = !!(effectiveWaiter.id && rt.employeeId === effectiveWaiter.id);
+            return (
+              <div
+                key={rt.id}
+                className="rounded-xl border-2 border-emerald-500 dark:border-emerald-600 bg-emerald-50 dark:bg-emerald-950/50 px-3.5 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 shadow-xs"
+              >
+                <div className="flex items-start gap-2.5 min-w-0">
+                  <div className="w-8 h-8 rounded-lg bg-emerald-600 text-white flex items-center justify-center shrink-0">
+                    <Bell className="w-4 h-4" />
+                  </div>
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-1.5 text-xs font-bold text-emerald-950 dark:text-emerald-100">
+                      <span>
+                        {rt.tableNumber ? `Table ${rt.tableNumber}` : 'Counter Order'} Ready for Pickup!
+                      </span>
+                      {isMine && (
+                        <span className="rounded bg-emerald-600 text-white text-[10px] font-bold px-1.5 py-0.5">
+                          YOUR TABLE
+                        </span>
+                      )}
+                      {rt.employeeName && !isMine && (
+                        <span className="text-[11px] font-medium text-emerald-800 dark:text-emerald-300">
+                          · {rt.employeeName}
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-xs text-emerald-800 dark:text-emerald-300 truncate mt-0.5">
+                      {rt.items.map((i) => `${i.quantity}× ${i.name}`).join(', ')}
+                    </div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  {rt.tableNumber && selectedTable !== rt.tableNumber && (
+                    <button
+                      type="button"
+                      onClick={() => openTable(rt.tableNumber)}
+                      className="rounded-lg border border-emerald-400 dark:border-emerald-700 bg-white dark:bg-slate-900 px-2.5 py-1.5 text-xs font-semibold text-emerald-900 dark:text-emerald-200 cursor-pointer"
+                    >
+                      Open T{rt.tableNumber}
+                    </button>
+                  )}
+                  {onUpdateKitchenStatus && (
+                    <button
+                      type="button"
+                      disabled={busyKotId === rt.id}
+                      onClick={() => void handleMarkKotServed(rt.id)}
+                      className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-50 cursor-pointer"
+                    >
+                      <CheckCheck className="w-3.5 h-3.5" />
+                      <span>{busyKotId === rt.id ? 'Saving...' : 'Mark Served'}</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
       {/* VIEW A: LIVE RESTAURANT TABLES FLOOR GRID */}
       {!selectedTable ? (
         <div className="space-y-4">
@@ -1680,17 +1855,29 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
                 {tableStats.occupied}
               </div>
             </div>
-            <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-3">
+            <div
+              className={`rounded-xl border p-3 ${
+                tableStats.ready > 0
+                  ? 'border-emerald-400 dark:border-emerald-700 bg-emerald-50/70 dark:bg-emerald-950/30'
+                  : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900'
+              }`}
+            >
               <div className="text-[11px] text-slate-500 dark:text-slate-400">
-                {waiterGrant ? 'My Tables' : 'Active'}
+                {tableStats.ready > 0 ? 'Ready to Serve' : waiterGrant ? 'My Tables' : 'Active'}
               </div>
-              <div className="text-xl font-bold font-mono tabular-nums text-slate-900 dark:text-slate-100">
-                {tableStats.mine}
+              <div
+                className={`text-xl font-bold font-mono tabular-nums ${
+                  tableStats.ready > 0
+                    ? 'text-emerald-700 dark:text-emerald-400'
+                    : 'text-slate-900 dark:text-slate-100'
+                }`}
+              >
+                {tableStats.ready > 0 ? tableStats.ready : tableStats.mine}
               </div>
             </div>
           </div>
 
-          <div className="flex items-center justify-between gap-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
             <h2 className="text-sm font-bold font-display text-slate-900 dark:text-slate-100">
               Tap a Table to Take Order
             </h2>
@@ -1700,6 +1887,9 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
                   { id: 'all', label: 'All' },
                   { id: 'empty', label: 'Empty' },
                   { id: 'occupied', label: 'Occupied' },
+                  ...(tableStats.ready > 0
+                    ? [{ id: 'ready' as const, label: `Ready (${tableStats.ready})` }]
+                    : []),
                 ] as const
               ).map((t) => (
                 <button
@@ -1722,6 +1912,8 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
             {filteredTables.map((num) => {
               const session = tableSessionMap.get(num);
               const isOccupied = !!session;
+              const kStatus = isOccupied ? tableKitchenStatusMap.get(num) : undefined;
+              const isKitchenReady = kStatus === 'ready';
               return (
                 <div
                   key={num}
@@ -1735,7 +1927,9 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
                     }
                   }}
                   className={`rounded-xl border p-4 transition-all flex flex-col justify-between min-h-[116px] cursor-pointer ${
-                    isOccupied
+                    isKitchenReady
+                      ? 'border-2 border-emerald-500 dark:border-emerald-600 bg-emerald-50/80 dark:bg-emerald-950/35 hover:bg-emerald-100/80 dark:hover:bg-emerald-950/55'
+                      : isOccupied
                       ? 'border-amber-400 dark:border-amber-700 bg-amber-50/75 dark:bg-amber-950/30 hover:bg-amber-100/70 dark:hover:bg-amber-950/50'
                       : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 hover:border-slate-400 dark:hover:border-slate-600'
                   }`}
@@ -1745,14 +1939,35 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
                       <div className="text-base font-bold font-display text-slate-900 dark:text-slate-100">
                         Table {num}
                       </div>
-                      <div
-                        className={`text-[11px] font-semibold mt-0.5 ${
-                          isOccupied
-                            ? 'text-amber-800 dark:text-amber-300'
-                            : 'text-emerald-700 dark:text-emerald-400'
-                        }`}
-                      >
-                        {isOccupied ? 'Occupied' : 'Empty'}
+                      <div className="mt-0.5 flex flex-wrap items-center gap-1">
+                        <span
+                          className={`text-[11px] font-semibold ${
+                            isKitchenReady
+                              ? 'text-emerald-800 dark:text-emerald-300'
+                              : isOccupied
+                              ? 'text-amber-800 dark:text-amber-300'
+                              : 'text-emerald-700 dark:text-emerald-400'
+                          }`}
+                        >
+                          {isOccupied ? 'Occupied' : 'Empty'}
+                        </span>
+                        {kStatus && (
+                          <span
+                            className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                              kStatus === 'ready'
+                                ? 'bg-emerald-600 text-white'
+                                : kStatus === 'preparing'
+                                ? 'bg-orange-100 text-orange-900 dark:bg-orange-950/70 dark:text-orange-300'
+                                : 'bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300'
+                            }`}
+                          >
+                            {kStatus === 'ready'
+                              ? 'Ready'
+                              : kStatus === 'preparing'
+                              ? 'Cooking'
+                              : 'Served'}
+                          </span>
+                        )}
                       </div>
                     </div>
                     {session && canPrintKot && (
@@ -1897,6 +2112,50 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
               placeholder="Guest name / special kitchen note (optional)"
               className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-2 text-xs text-slate-900 dark:text-slate-100"
             />
+
+            {/* Live Kitchen Status Strip for Selected Table */}
+            {activeTableSession && !editingOrder && selectedTableActiveTickets.length > 0 && (
+              <div className="space-y-1.5">
+                {selectedTableActiveTickets.map((kt) => {
+                  const isReady = kt.kitchenStatus === 'ready';
+                  return (
+                    <div
+                      key={kt.id}
+                      className={`rounded-lg border px-3 py-2 flex flex-wrap items-center justify-between gap-2 text-xs ${
+                        isReady
+                          ? 'border-emerald-400 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-950 dark:text-emerald-100'
+                          : 'border-orange-200 dark:border-orange-900/60 bg-orange-50/70 dark:bg-orange-950/25 text-orange-950 dark:text-orange-200'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2 min-w-0">
+                        {isReady ? (
+                          <Bell className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                        ) : (
+                          <ChefHat className="w-3.5 h-3.5 text-orange-600 shrink-0" />
+                        )}
+                        <span className="font-semibold">
+                          {isReady ? 'Kitchen: Ready to Serve' : 'Kitchen: Preparing'}
+                        </span>
+                        <span className="font-mono text-[11px] opacity-75">
+                          ({kt.itemCount} items)
+                        </span>
+                      </div>
+                      {isReady && onUpdateKitchenStatus && (
+                        <button
+                          type="button"
+                          disabled={busyKotId === kt.id}
+                          onClick={() => void handleMarkKotServed(kt.id)}
+                          className="inline-flex items-center gap-1 rounded-md bg-emerald-600 hover:bg-emerald-700 px-2.5 py-1 text-[11px] font-semibold text-white disabled:opacity-50 cursor-pointer"
+                        >
+                          <CheckCheck className="w-3 h-3" />
+                          <span>{busyKotId === kt.id ? '...' : 'Mark Served'}</span>
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
 
             {/* Already Ordered Items on Occupied Table (or Live Edit Draft) */}
             {activeTableSession && !editingOrder && (

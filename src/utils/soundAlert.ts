@@ -8,6 +8,7 @@
 let sharedAudioCtx: AudioContext | null = null;
 let cachedKotWavUrl: string | null = null;
 let cachedBillWavUrl: string | null = null;
+let cachedReadyWavUrl: string | null = null;
 let unlockListenersAttached = false;
 
 function getAudioContextConstructor(): typeof AudioContext | null {
@@ -52,6 +53,12 @@ const BILL_CHIME_NOTES: ChimeNote[] = [
   { freq: 1046.5, overtone: 2093.0, startSec: 0, durationSec: 0.35, decayRate: 9.0, gain: 0.52 },
   { freq: 1318.51, overtone: 2637.02, startSec: 0.14, durationSec: 0.38, decayRate: 8.5, gain: 0.56 },
   { freq: 1567.98, overtone: 3135.96, startSec: 0.28, durationSec: 0.65, decayRate: 5.5, gain: 0.64 },
+];
+
+// Crisp 2-tone kitchen pickup bell (E6 -> A6) for Waiter Order Ready alerts
+const READY_CHIME_NOTES: ChimeNote[] = [
+  { freq: 1318.51, overtone: 2637.02, startSec: 0, durationSec: 0.32, decayRate: 8.5, gain: 0.56 },
+  { freq: 1760.0, overtone: 3520.0, startSec: 0.16, durationSec: 0.65, decayRate: 5.5, gain: 0.66 },
 ];
 
 function buildWavDataUrl(notes: ChimeNote[], totalDurationSec: number): string | null {
@@ -217,4 +224,29 @@ export async function playBillClearedChime(): Promise<boolean> {
     }
     return cachedBillWavUrl;
   });
+}
+
+/**
+ * Plays a crisp service pickup chime (E6 -> A6) when Kitchen marks an order Ready for the waiter.
+ */
+export async function playOrderReadyChime(): Promise<boolean> {
+  return playChime(READY_CHIME_NOTES, () => {
+    if (!cachedReadyWavUrl) {
+      cachedReadyWavUrl = buildWavDataUrl(READY_CHIME_NOTES, 0.88);
+    }
+    return cachedReadyWavUrl;
+  });
+}
+
+/**
+ * Vibrates supported mobile devices briefly when a kitchen order becomes Ready.
+ */
+export function triggerReadyVibration(): void {
+  if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
+    try {
+      navigator.vibrate([180, 80, 180]);
+    } catch {
+      // Ignore vibration permission/hardware errors
+    }
+  }
 }
