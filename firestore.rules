@@ -144,7 +144,7 @@ service cloud.firestore {
         data.keys().hasOnly([
           'ownerId', 'storeId', 'name', 'sku', 'barcode', 'category',
           'costPrice', 'sellingPrice', 'stock', 'minStock', 'unit',
-          'active', 'createdAt', 'updatedAt'
+          'trackStock', 'active', 'createdAt', 'updatedAt'
         ]) &&
         isValidId(data.ownerId) &&
         isValidId(data.storeId) &&
@@ -158,6 +158,7 @@ service cloud.firestore {
         data.stock is number && data.stock >= 0 && data.stock <= 10000000 &&
         data.minStock is number && data.minStock >= 0 && data.minStock <= 1000000 &&
         data.unit is string && data.unit.size() >= 1 && data.unit.size() <= 20 &&
+        (!('trackStock' in data) || data.trackStock is bool) &&
         data.active is bool &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
@@ -583,7 +584,7 @@ service cloud.firestore {
                   (isRetailStore(storeId) || incoming().barcode == '') &&
                   incoming().diff(existing()).affectedKeys().hasOnly([
                     'name', 'sku', 'barcode', 'category', 'costPrice', 'sellingPrice',
-                    'stock', 'minStock', 'unit', 'active', 'updatedAt'
+                    'stock', 'minStock', 'unit', 'trackStock', 'active', 'updatedAt'
                   ])
                 ) ||
                 incoming().diff(existing()).affectedKeys().hasOnly(['stock', 'updatedAt'])

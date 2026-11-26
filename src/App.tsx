@@ -858,6 +858,7 @@ function POSWorkspace() {
             stock: item.stock,
             minStock: item.minStock,
             unit: item.unit,
+            trackStock: payload.businessType === 'restaurant' ? (item.trackStock ?? false) : true,
             active: true,
             createdAt: serverTimestamp(),
             updatedAt: serverTimestamp(),

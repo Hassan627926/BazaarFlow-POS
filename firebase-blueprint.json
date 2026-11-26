@@ -100,6 +100,7 @@
         "stock": { "type": "number" },
         "minStock": { "type": "number" },
         "unit": { "type": "string", "minLength": 1, "maxLength": 20 },
+        "trackStock": { "type": "boolean", "description": "Whether stock quantity is tracked and deducted on sale (false for made-to-order restaurant dishes)." },
         "active": { "type": "boolean" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }

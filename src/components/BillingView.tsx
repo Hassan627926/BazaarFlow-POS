@@ -41,6 +41,7 @@ import {
   generateInvoiceNumber,
   generateSafeId,
   getTodayDateKey,
+  isProductStockTracked,
 } from '../utils/posHelpers';
 
 interface BillingViewProps {
@@ -263,7 +264,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
         activeTableSession.items.find((i) => i.productId === productId)?.quantity ?? 0;
       const currentDraftQty = editTableItems.find((i) => i.productId === productId)?.quantity ?? 0;
       const netExtraNeeded = currentDraftQty + delta - originalQty;
-      if (product && netExtraNeeded > product.stock) {
+      if (product && isProductStockTracked(product) && netExtraNeeded > product.stock) {
         setCheckoutError(
           `Only ${product.stock} extra ${product.unit} available in stock for ${product.name}.`
         );
@@ -306,7 +307,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
         activeTableSession.items.find((i) => i.productId === productId)?.quantity ?? 0;
       const currentDraftQty = baseDraft.find((i) => i.productId === productId)?.quantity ?? 0;
       const netExtraNeeded = currentDraftQty + delta - originalQty;
-      if (product && netExtraNeeded > product.stock) {
+      if (product && isProductStockTracked(product) && netExtraNeeded > product.stock) {
         setCheckoutError(
           `Only ${product.stock} extra ${product.unit} available in stock for ${product.name}.`
         );
@@ -390,7 +391,8 @@ export const BillingView: React.FC<BillingViewProps> = ({
         activeTableSession.items.find((i) => i.productId === product.id)?.quantity ?? 0;
       const currentDraftQty = editTableItems.find((i) => i.productId === product.id)?.quantity ?? 0;
       const netExtraNeeded = currentDraftQty + 1 - originalQty;
-      if (netExtraNeeded > product.stock) {
+      const tracked = isProductStockTracked(product);
+      if (tracked && netExtraNeeded > product.stock) {
         setCheckoutError(
           product.stock <= 0
             ? `${product.name} is out of stock.`
@@ -425,7 +427,8 @@ export const BillingView: React.FC<BillingViewProps> = ({
       return;
     }
 
-    if (product.stock <= 0) {
+    const tracked = isProductStockTracked(product);
+    if (tracked && product.stock <= 0) {
       setCheckoutError(`${product.name} is out of stock.`);
       return;
     }
@@ -433,7 +436,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
     setCart((prev) => {
       const existing = prev.find((c) => c.product.id === product.id);
       if (existing) {
-        if (existing.quantity >= product.stock) {
+        if (tracked && existing.quantity >= product.stock) {
           setCheckoutError(`Only ${product.stock} ${product.unit} available for ${product.name}.`);
           return prev;
         }
@@ -452,7 +455,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
         .map((item) => {
           if (item.product.id !== productId) return item;
           const nextQty = item.quantity + delta;
-          if (nextQty > item.product.stock) {
+          if (isProductStockTracked(item.product) && nextQty > item.product.stock) {
             setCheckoutError(
               `Stock limit reached (${item.product.stock} ${item.product.unit}) for ${item.product.name}.`
             );
@@ -769,8 +772,9 @@ export const BillingView: React.FC<BillingViewProps> = ({
         });
       }
 
-      // Deduct stock ONLY for newly added cart items
+      // Deduct stock ONLY for newly added cart items that track stock
       for (const c of cart) {
+        if (!isProductStockTracked(c.product)) continue;
         const nextStock = Math.max(0, Number((c.product.stock - c.quantity).toFixed(2)));
         batch.update(doc(db, 'stores', store.id, 'products', c.product.id), {
           stock: nextStock,
@@ -856,11 +860,11 @@ export const BillingView: React.FC<BillingViewProps> = ({
       return;
     }
 
-    // Verify sufficient stock for any increased/newly added items
+    // Verify sufficient stock for any increased/newly added stock-tracked items
     for (const d of tableOrderDiff) {
       if (d.delta > 0) {
         const prod = products.find((p) => p.id === d.productId);
-        if (prod && prod.stock < d.delta) {
+        if (prod && isProductStockTracked(prod) && prod.stock < d.delta) {
           setCheckoutError(
             `Only ${prod.stock} extra ${prod.unit} available in stock for ${prod.name}.`
           );
@@ -890,10 +894,10 @@ export const BillingView: React.FC<BillingViewProps> = ({
       const batch = writeBatch(db);
       const tableRef = doc(db, 'stores', store.id, 'tables', activeTableSession.id);
 
-      // Reconcile inventory stock for every changed item (restore on reduction, deduct on addition)
+      // Reconcile inventory stock for every changed stock-tracked item (restore on reduction, deduct on addition)
       tableOrderDiff.forEach((d, idx) => {
         const prod = products.find((p) => p.id === d.productId);
-        if (!prod) return;
+        if (!prod || !isProductStockTracked(prod)) return;
         const currentStock = Number.isFinite(Number(prod.stock)) ? Number(prod.stock) : 0;
         const nextStock = Math.max(
           0,
@@ -1138,8 +1142,9 @@ export const BillingView: React.FC<BillingViewProps> = ({
         updatedAt: serverTimestamp(),
       });
 
-      // Deduct stock ONLY for items currently in the unsaved cart (booked table items already deducted)
+      // Deduct stock ONLY for items currently in the unsaved cart that track stock (booked table items already deducted)
       for (const c of cart) {
+        if (!isProductStockTracked(c.product)) continue;
         const nextStock = Math.max(0, Number((c.product.stock - c.quantity).toFixed(2)));
         const prodRef = doc(db, 'stores', store.id, 'products', c.product.id);
         batch.update(prodRef, {
@@ -2419,12 +2424,13 @@ export const BillingView: React.FC<BillingViewProps> = ({
                 editingTableOrder && activeTableSession ? inCart : inCart > 0 ? inCart : 0;
               const canQuickDecrement =
                 inCart > 0 || (!!activeTableSession && !editingTableOrder && originalOnTable > 0);
+              const tracked = isProductStockTracked(product);
               const availableStock =
                 editingTableOrder && activeTableSession
                   ? product.stock + Math.max(0, originalOnTable - inCart)
                   : product.stock;
-              const isOut = availableStock <= 0;
-              const isLow = product.stock > 0 && product.stock <= product.minStock;
+              const isOut = tracked && availableStock <= 0;
+              const isLow = tracked && product.stock > 0 && product.stock <= product.minStock;
 
               const handleCardDecrement = (e: React.MouseEvent) => {
                 e.stopPropagation();
@@ -2519,14 +2525,16 @@ export const BillingView: React.FC<BillingViewProps> = ({
                       </span>
                       <span
                         className={`text-[11px] font-mono tabular-nums ${
-                          isOut
+                          !tracked
+                            ? 'text-emerald-700 dark:text-emerald-400 font-medium'
+                            : isOut
                             ? 'text-red-600 dark:text-red-400 font-semibold'
                             : isLow
                             ? 'text-amber-600 dark:text-amber-400 font-medium'
                             : 'text-slate-500 dark:text-slate-400'
                         }`}
                       >
-                        {isOut ? 'Out' : `${product.stock} ${product.unit}`}
+                        {!tracked ? 'Fresh' : isOut ? 'Out' : `${product.stock} ${product.unit}`}
                       </span>
                     </div>
                   )}

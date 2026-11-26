@@ -79,6 +79,7 @@ export interface Product {
   stock: number;
   minStock: number;
   unit: string;
+  trackStock?: boolean;
   active: boolean;
   createdAt?: Timestamp | null;
   updatedAt?: Timestamp | null;

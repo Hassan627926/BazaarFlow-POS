@@ -17,6 +17,7 @@ import {
   formatMoney,
   generateSafeId,
   getTodayDateKey,
+  isProductStockTracked,
 } from '../utils/posHelpers';
 
 interface SalesHistoryViewProps {
@@ -101,7 +102,7 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
       const productMap = new Map(products.map((p) => [p.id, p]));
       for (const item of sale.items) {
         const prod = productMap.get(item.productId);
-        if (prod) {
+        if (prod && isProductStockTracked(prod)) {
           const restoredStock = Number((prod.stock + item.quantity).toFixed(2));
           batch.update(doc(db, 'stores', store.id, 'products', prod.id), {
             stock: restoredStock,

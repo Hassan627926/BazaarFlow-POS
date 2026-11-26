@@ -42,6 +42,7 @@ import {
   generateInvoiceNumber,
   generateSafeId,
   getTodayDateKey,
+  isProductStockTracked,
 } from '../utils/posHelpers';
 import { PWAInstallButton } from './PWAInstallButton';
 
@@ -446,7 +447,7 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
       const curQty = editItems.find((i) => i.productId === product.id)?.quantity ?? 0;
       const nextQty = curQty + delta;
 
-      if (delta > 0) {
+      if (delta > 0 && isProductStockTracked(product)) {
         const netExtra = nextQty - origQty;
         if (netExtra > product.stock) {
           setErrorMsg(`Only ${product.stock} extra ${product.unit} available for ${product.name}.`);
@@ -486,18 +487,19 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
     }
 
     // Normal order / add-on cart
+    const tracked = isProductStockTracked(product);
     setCart((prev) => {
       const existing = prev.find((c) => c.product.id === product.id);
       if (!existing) {
         if (delta <= 0) return prev;
-        if (product.stock <= 0) {
+        if (tracked && product.stock <= 0) {
           setErrorMsg(`${product.name} is out of stock.`);
           return prev;
         }
         return [...prev, { product, quantity: 1 }];
       }
       const nextQty = existing.quantity + delta;
-      if (nextQty > product.stock) {
+      if (tracked && nextQty > product.stock) {
         setErrorMsg(`Only ${product.stock} ${product.unit} available for ${product.name}.`);
         return prev;
       }
@@ -522,7 +524,7 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
         const origQty =
           activeTableSession.items.find((i) => i.productId === adjustProductId)?.quantity ?? 0;
         const curQty = draft.find((i) => i.productId === adjustProductId)?.quantity ?? 0;
-        if (prod && curQty + delta - origQty > prod.stock) {
+        if (prod && isProductStockTracked(prod) && curQty + delta - origQty > prod.stock) {
           setErrorMsg(`Only ${prod.stock} extra ${prod.unit} available for ${prod.name}.`);
           return;
         }
@@ -724,6 +726,7 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
       }
 
       cart.forEach((c, idx) => {
+        if (!isProductStockTracked(c.product)) return;
         const nextStock = Math.max(0, Number((c.product.stock - c.quantity).toFixed(2)));
         batch.update(doc(db, 'stores', store.id, 'products', c.product.id), {
           stock: nextStock,
@@ -848,7 +851,7 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
     for (const d of editDiff) {
       if (d.delta > 0) {
         const prod = products.find((p) => p.id === d.productId);
-        if (prod && prod.stock < d.delta) {
+        if (prod && isProductStockTracked(prod) && prod.stock < d.delta) {
           setErrorMsg(`Only ${prod.stock} extra ${prod.unit} available for ${prod.name}.`);
           return;
         }
@@ -882,7 +885,7 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
 
       editDiff.forEach((d, idx) => {
         const prod = products.find((p) => p.id === d.productId);
-        if (!prod) return;
+        if (!prod || !isProductStockTracked(prod)) return;
         const currentStock = Number.isFinite(Number(prod.stock)) ? Number(prod.stock) : 0;
         const nextStock = Math.max(0, Number((currentStock - d.delta).toFixed(2)));
         batch.update(doc(db, 'stores', store.id, 'products', prod.id), {
@@ -1559,7 +1562,8 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
               {filteredProducts.map((product) => {
                 const qty = cartQtyMap.get(product.id) ?? 0;
-                const outOfStock = product.stock <= 0 && !editingOrder;
+                const tracked = isProductStockTracked(product);
+                const outOfStock = tracked && product.stock <= 0 && !editingOrder;
                 return (
                   <div
                     key={product.id}
@@ -1582,8 +1586,18 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
                             {formatMoney(product.sellingPrice, store.currency)}
                           </span>
                         )}
-                        <span className="text-[11px] text-slate-400 font-mono">
-                          {product.stock <= 0 ? 'Out of stock' : `${product.stock} left`}
+                        <span
+                          className={`text-[11px] font-mono ${
+                            !tracked
+                              ? 'text-emerald-700 dark:text-emerald-400 font-medium'
+                              : 'text-slate-400'
+                          }`}
+                        >
+                          {!tracked
+                            ? 'Fresh · Unlimited'
+                            : product.stock <= 0
+                            ? 'Out of stock'
+                            : `${product.stock} left`}
                         </span>
                       </div>
                     </div>

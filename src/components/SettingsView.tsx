@@ -15,7 +15,7 @@ import {
 } from 'lucide-react';
 import { doc, serverTimestamp, updateDoc } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '../firebase';
-import { BLUEPRINT_LIMITS, type BusinessType, type StoreConfig } from '../types';
+import { BLUEPRINT_LIMITS, type StoreConfig } from '../types';
 import { compressLogoImage, CURRENCY_OPTIONS, THEME_PRESETS } from '../utils/posHelpers';
 import { PWAInstallButton } from './PWAInstallButton';
 
@@ -37,7 +37,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   onOpenPasswordSetup,
 }) => {
   const [name, setName] = useState(store.name);
-  const [businessType, setBusinessType] = useState<BusinessType>(store.businessType);
   const [logoDataUrl, setLogoDataUrl] = useState(store.logoDataUrl);
   const [primaryColor, setPrimaryColor] = useState(store.primaryColor);
   const [accentColor, setAccentColor] = useState(store.accentColor);
@@ -55,7 +54,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
   useEffect(() => {
     setName(store.name);
-    setBusinessType(store.businessType);
     setLogoDataUrl(store.logoDataUrl);
     setPrimaryColor(store.primaryColor);
     setAccentColor(store.accentColor);
@@ -116,7 +114,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     try {
       await updateDoc(doc(db, 'stores', store.id), {
         name: cleanName.slice(0, BLUEPRINT_LIMITS.STORE_NAME_MAX),
-        businessType,
         logoDataUrl: logoDataUrl.slice(0, BLUEPRINT_LIMITS.LOGO_DATA_URL_MAX),
         primaryColor,
         accentColor,
@@ -140,53 +137,30 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   return (
     <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
       <form onSubmit={handleSave} className="lg:col-span-8 space-y-6">
-        {/* Brand Identity & Mode */}
+        {/* Brand Identity & Receipt Details */}
         <section className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-6 space-y-5">
-          <div>
-            <h2 className="text-base font-bold font-display text-slate-900 dark:text-slate-100">
-              Brand Identity & Store Mode
-            </h2>
-            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-              Customize your shop name, logo, receipt details, and business workflow.
-            </p>
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <button
-              type="button"
-              onClick={() => setBusinessType('retail')}
-              className={`text-left rounded-lg border p-3.5 transition-colors cursor-pointer ${
-                businessType === 'retail'
-                  ? 'border-slate-900 dark:border-slate-100 bg-slate-50 dark:bg-slate-800'
-                  : 'border-slate-200 dark:border-slate-800'
-              }`}
-            >
-              <div className="flex items-center gap-2 text-sm font-semibold text-slate-900 dark:text-slate-100">
-                <Store className="w-4 h-4" />
-                <span>Retail / Shop Mode</span>
-              </div>
-              <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                Enables EAN-13 Barcode generator, barcode label printing, and scanner billing.
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h2 className="text-base font-bold font-display text-slate-900 dark:text-slate-100">
+                Brand Identity & Receipt Details
+              </h2>
+              <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                Customize your {store.businessType === 'restaurant' ? 'restaurant' : 'shop'} name, logo, tax rate, and receipt details.
               </p>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setBusinessType('restaurant')}
-              className={`text-left rounded-lg border p-3.5 transition-colors cursor-pointer ${
-                businessType === 'restaurant'
-                  ? 'border-slate-900 dark:border-slate-100 bg-slate-50 dark:bg-slate-800'
-                  : 'border-slate-200 dark:border-slate-800'
-              }`}
-            >
-              <div className="flex items-center gap-2 text-sm font-semibold text-slate-900 dark:text-slate-100">
-                <UtensilsCrossed className="w-4 h-4" />
-                <span>Restaurant / Cafe Mode</span>
-              </div>
-              <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                Hides all barcode features; enables Table Numbers, Dine-In/Takeaway & KOT print.
-              </p>
-            </button>
+            </div>
+            <div className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/70 px-3 py-1.5 text-xs font-semibold text-slate-700 dark:text-slate-200 shrink-0">
+              {store.businessType === 'restaurant' ? (
+                <>
+                  <UtensilsCrossed className="w-3.5 h-3.5" />
+                  <span>Restaurant / Cafe</span>
+                </>
+              ) : (
+                <>
+                  <Store className="w-3.5 h-3.5" />
+                  <span>Retail / Shop</span>
+                </>
+              )}
+            </div>
           </div>
 
           {/* Logo Upload */}
@@ -281,7 +255,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               />
             </div>
 
-            {businessType === 'restaurant' && (
+            {store.businessType === 'restaurant' && (
               <div className="sm:col-span-2">
                 <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
                   Dine-In Tables Count (1 – {BLUEPRINT_LIMITS.TABLE_COUNT_MAX})

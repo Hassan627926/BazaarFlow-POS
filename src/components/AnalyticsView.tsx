@@ -18,6 +18,7 @@ import {
   exportSalesLedgerCSV,
   formatMoney,
   getTodayDateKey,
+  isProductStockTracked,
 } from '../utils/posHelpers';
 
 interface AnalyticsViewProps {
@@ -121,7 +122,7 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
   }, [completedSales]);
 
   const lowStockItems = useMemo(
-    () => products.filter((p) => p.stock <= p.minStock).slice(0, 6),
+    () => products.filter((p) => isProductStockTracked(p) && p.stock <= p.minStock).slice(0, 6),
     [products]
   );
 

@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Download, ExternalLink, FileText, MessageCircle, Printer, X } from 'lucide-react';
 import type { PrintJob, Sale, StoreConfig } from '../types';
-import { formatDateTime, formatMoney } from '../utils/posHelpers';
+import { formatDateTime, formatMoney, isProductStockTracked } from '../utils/posHelpers';
 import { generateReceiptPdfFile, triggerPdfDownload } from '../utils/receiptPdf';
 import { BarcodeSvg } from './BarcodeSvg';
 
@@ -506,7 +506,9 @@ export const PrintModal: React.FC<PrintModalProps> = ({
     const cashSales = completed.filter((s) => s.paymentMethod === 'cash').reduce((a, s) => a + s.total, 0);
     const cardSales = completed.filter((s) => s.paymentMethod === 'card').reduce((a, s) => a + s.total, 0);
     const qrSales = completed.filter((s) => s.paymentMethod === 'bank_qr').reduce((a, s) => a + s.total, 0);
-    const lowStockCount = products.filter((p) => p.stock <= p.minStock).length;
+    const lowStockCount = products.filter(
+      (p) => isProductStockTracked(p) && p.stock <= p.minStock
+    ).length;
 
     return (
       <div className="print-full-sheet bg-white text-slate-950 border border-slate-200 rounded-lg p-6 space-y-5">

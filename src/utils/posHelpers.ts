@@ -259,6 +259,10 @@ export function exportSalesLedgerCSV(store: StoreConfig, sales: Sale[]): void {
   triggerCsvDownload(`${slug}-sales-ledger-${getTodayDateKey()}.csv`, rows);
 }
 
+export function isProductStockTracked(product: Pick<Product, 'trackStock'>): boolean {
+  return product.trackStock !== false;
+}
+
 export function exportInventoryCSV(store: StoreConfig, products: Product[]): void {
   const isRetail = store.businessType === 'retail';
   const headers = isRetail
@@ -268,6 +272,7 @@ export function exportInventoryCSV(store: StoreConfig, products: Product[]): voi
   const rows: (string | number)[][] = [
     headers,
     ...products.map((p) => {
+      const tracked = isProductStockTracked(p);
       const base = isRetail
         ? [p.name, p.sku, p.barcode, p.category, p.unit]
         : [p.name, p.sku, p.category, p.unit];
@@ -275,10 +280,10 @@ export function exportInventoryCSV(store: StoreConfig, products: Product[]): voi
         ...base,
         p.costPrice.toFixed(2),
         p.sellingPrice.toFixed(2),
-        p.stock,
-        p.minStock,
-        (p.costPrice * p.stock).toFixed(2),
-        (p.sellingPrice * p.stock).toFixed(2),
+        tracked ? p.stock : 'Unlimited',
+        tracked ? p.minStock : '—',
+        tracked ? (p.costPrice * p.stock).toFixed(2) : '0.00',
+        tracked ? (p.sellingPrice * p.stock).toFixed(2) : '0.00',
       ];
     }),
   ];
@@ -297,6 +302,7 @@ export interface StarterProductTemplate {
   stock: number;
   minStock: number;
   unit: string;
+  trackStock?: boolean;
 }
 
 export const RETAIL_STARTER_PRODUCTS: StarterProductTemplate[] = [
@@ -311,12 +317,12 @@ export const RETAIL_STARTER_PRODUCTS: StarterProductTemplate[] = [
 ];
 
 export const RESTAURANT_STARTER_PRODUCTS: StarterProductTemplate[] = [
-  { name: 'Chicken Karahi (Half)', sku: 'MN-001', barcode: '', category: 'Main Course', costPrice: 680, sellingPrice: 1350, stock: 30, minStock: 6, unit: 'dish' },
-  { name: 'Mutton Biryani Special', sku: 'MN-002', barcode: '', category: 'Main Course', costPrice: 420, sellingPrice: 850, stock: 45, minStock: 10, unit: 'plate' },
-  { name: 'Smoky Beef Smash Burger', sku: 'FF-001', barcode: '', category: 'Burgers & Grill', costPrice: 340, sellingPrice: 720, stock: 38, minStock: 8, unit: 'serving' },
-  { name: 'Chicken Malai Boti', sku: 'BBQ-001', barcode: '', category: 'BBQ & Grill', costPrice: 390, sellingPrice: 780, stock: 25, minStock: 6, unit: 'skewer' },
-  { name: 'Garlic Butter Naan', sku: 'BRD-001', barcode: '', category: 'Breads', costPrice: 35, sellingPrice: 110, stock: 120, minStock: 25, unit: 'pcs' },
-  { name: 'Loaded Cheese Fries', sku: 'STR-001', barcode: '', category: 'Starters', costPrice: 180, sellingPrice: 420, stock: 40, minStock: 10, unit: 'bowl' },
-  { name: 'Fresh Mint Margarita', sku: 'DRK-001', barcode: '', category: 'Drinks', costPrice: 80, sellingPrice: 260, stock: 60, minStock: 12, unit: 'glass' },
-  { name: 'Karak Doodh Patti Chai', sku: 'DRK-002', barcode: '', category: 'Drinks', costPrice: 45, sellingPrice: 160, stock: 90, minStock: 15, unit: 'cup' },
+  { name: 'Chicken Karahi (Half)', sku: 'MN-001', barcode: '', category: 'Main Course', costPrice: 680, sellingPrice: 1350, stock: 0, minStock: 0, unit: 'dish', trackStock: false },
+  { name: 'Mutton Biryani Special', sku: 'MN-002', barcode: '', category: 'Main Course', costPrice: 420, sellingPrice: 850, stock: 0, minStock: 0, unit: 'plate', trackStock: false },
+  { name: 'Smoky Beef Smash Burger', sku: 'FF-001', barcode: '', category: 'Burgers & Grill', costPrice: 340, sellingPrice: 720, stock: 0, minStock: 0, unit: 'serving', trackStock: false },
+  { name: 'Chicken Malai Boti', sku: 'BBQ-001', barcode: '', category: 'BBQ & Grill', costPrice: 390, sellingPrice: 780, stock: 0, minStock: 0, unit: 'skewer', trackStock: false },
+  { name: 'Garlic Butter Naan', sku: 'BRD-001', barcode: '', category: 'Breads', costPrice: 35, sellingPrice: 110, stock: 0, minStock: 0, unit: 'pcs', trackStock: false },
+  { name: 'Loaded Cheese Fries', sku: 'STR-001', barcode: '', category: 'Starters', costPrice: 180, sellingPrice: 420, stock: 0, minStock: 0, unit: 'bowl', trackStock: false },
+  { name: 'Fresh Mint Margarita', sku: 'DRK-001', barcode: '', category: 'Drinks', costPrice: 80, sellingPrice: 260, stock: 0, minStock: 0, unit: 'glass', trackStock: false },
+  { name: 'Karak Doodh Patti Chai', sku: 'DRK-002', barcode: '', category: 'Drinks', costPrice: 45, sellingPrice: 160, stock: 0, minStock: 0, unit: 'cup', trackStock: false },
 ];

@@ -25,6 +25,7 @@ import {
   formatMoney,
   generateEAN13Barcode,
   generateSafeId,
+  isProductStockTracked,
 } from '../utils/posHelpers';
 import { BarcodeSvg } from './BarcodeSvg';
 
@@ -60,6 +61,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
   const [stock, setStock] = useState('0');
   const [minStock, setMinStock] = useState('5');
   const [unit, setUnit] = useState(isRetail ? 'pcs' : 'plate');
+  const [trackStock, setTrackStock] = useState<boolean>(isRetail);
   const [active, setActive] = useState(true);
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
@@ -73,19 +75,22 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
 
   const metrics = useMemo(() => {
     const totalSkus = products.length;
-    const totalUnits = products.reduce((a, p) => a + p.stock, 0);
-    const costValue = products.reduce((a, p) => a + p.costPrice * p.stock, 0);
-    const retailValue = products.reduce((a, p) => a + p.sellingPrice * p.stock, 0);
-    const lowStock = products.filter((p) => p.stock > 0 && p.stock <= p.minStock).length;
-    const outStock = products.filter((p) => p.stock <= 0).length;
-    return { totalSkus, totalUnits, costValue, retailValue, lowStock, outStock };
+    const trackedProducts = products.filter((p) => isProductStockTracked(p));
+    const unlimitedCount = totalSkus - trackedProducts.length;
+    const totalUnits = trackedProducts.reduce((a, p) => a + p.stock, 0);
+    const costValue = trackedProducts.reduce((a, p) => a + p.costPrice * p.stock, 0);
+    const retailValue = trackedProducts.reduce((a, p) => a + p.sellingPrice * p.stock, 0);
+    const lowStock = trackedProducts.filter((p) => p.stock > 0 && p.stock <= p.minStock).length;
+    const outStock = trackedProducts.filter((p) => p.stock <= 0).length;
+    return { totalSkus, unlimitedCount, totalUnits, costValue, retailValue, lowStock, outStock };
   }, [products]);
 
   const filteredProducts = useMemo(() => {
     const q = search.trim().toLowerCase();
     return products.filter((p) => {
-      if (stockFilter === 'low' && !(p.stock > 0 && p.stock <= p.minStock)) return false;
-      if (stockFilter === 'out' && p.stock > 0) return false;
+      const tracked = isProductStockTracked(p);
+      if (stockFilter === 'low' && !(tracked && p.stock > 0 && p.stock <= p.minStock)) return false;
+      if (stockFilter === 'out' && !(tracked && p.stock <= 0)) return false;
       if (!q) return true;
       return (
         p.name.toLowerCase().includes(q) ||
@@ -121,10 +126,12 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
       setCategory('');
       setIsAddingNewCategory(true);
     }
+    const defaultTracked = isRetail;
+    setTrackStock(defaultTracked);
     setCostPrice('');
     setSellingPrice('');
-    setStock('20');
-    setMinStock('5');
+    setStock(defaultTracked ? '20' : '0');
+    setMinStock(defaultTracked ? '5' : '0');
     setUnit(isRetail ? 'pcs' : 'plate');
     setActive(true);
     setFormError(null);
@@ -132,12 +139,14 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
   };
 
   const openEditModal = (product: Product) => {
+    const tracked = isProductStockTracked(product);
     setEditingProduct(product);
     setName(product.name);
     setSku(product.sku);
     setBarcode(isRetail ? product.barcode : '');
     setCategory(product.category);
     setIsAddingNewCategory(!existingCategories.includes(product.category));
+    setTrackStock(tracked);
     setCostPrice(product.costPrice > 0 ? String(product.costPrice) : '');
     setSellingPrice(String(product.sellingPrice));
     setStock(String(product.stock));
@@ -152,10 +161,11 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
     e.preventDefault();
     const cleanName = name.trim();
     const cleanCat = category.trim();
+    const effectiveTrackStock = isRetail ? true : trackStock;
     const parsedCost = costPrice.trim() === '' ? 0 : Number(costPrice);
     const parsedSell = Number(sellingPrice || 0);
-    const parsedStock = Number(stock || 0);
-    const parsedMin = Number(minStock || 0);
+    const parsedStock = effectiveTrackStock ? Number(stock || 0) : 0;
+    const parsedMin = effectiveTrackStock ? Number(minStock || 0) : 0;
 
     if (!cleanName || !cleanCat) {
       setFormError('Item name and category are required.');
@@ -189,11 +199,12 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
           stock: parsedStock,
           minStock: parsedMin,
           unit: unit.trim().slice(0, BLUEPRINT_LIMITS.UNIT_MAX) || 'pcs',
+          trackStock: effectiveTrackStock,
           active,
           updatedAt: serverTimestamp(),
         });
 
-        if (parsedStock !== editingProduct.stock) {
+        if (effectiveTrackStock && parsedStock !== editingProduct.stock) {
           const logId = generateSafeId('log');
           batch.set(doc(db, 'stores', store.id, 'stockLogs', logId), {
             ownerId,
@@ -222,6 +233,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
           stock: parsedStock,
           minStock: parsedMin,
           unit: unit.trim().slice(0, BLUEPRINT_LIMITS.UNIT_MAX) || 'pcs',
+          trackStock: effectiveTrackStock,
           active,
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
@@ -308,7 +320,9 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
             {metrics.totalSkus}
           </div>
           <div className="mt-1 text-xs text-slate-500 dark:text-slate-400 font-mono tabular-nums">
-            {metrics.totalUnits} total units
+            {isRetail
+              ? `${metrics.totalUnits} total units`
+              : `${metrics.unlimitedCount} made-to-order · ${metrics.totalUnits} stocked`}
           </div>
         </div>
 
@@ -449,8 +463,9 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                   </tr>
                 ) : (
                   filteredProducts.map((p) => {
-                    const isOut = p.stock <= 0;
-                    const isLow = p.stock > 0 && p.stock <= p.minStock;
+                    const tracked = isProductStockTracked(p);
+                    const isOut = tracked && p.stock <= 0;
+                    const isLow = tracked && p.stock > 0 && p.stock <= p.minStock;
                     return (
                       <tr
                         key={p.id}
@@ -479,37 +494,52 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                           {formatMoney(p.sellingPrice, store.currency)}
                         </td>
                         <td className="py-3 px-4 text-right font-mono text-xs tabular-nums">
-                          <span
-                            className={
-                              isOut
-                                ? 'text-red-600 dark:text-red-400 font-semibold'
-                                : isLow
-                                ? 'text-amber-600 dark:text-amber-400 font-semibold'
-                                : 'text-slate-900 dark:text-slate-100'
-                            }
-                          >
-                            {p.stock} {p.unit}
-                          </span>
-                          <div className="text-[11px] text-slate-400">
-                            {isOut ? 'Out of stock' : isLow ? 'Low stock' : `Min ${p.minStock}`}
-                          </div>
+                          {!tracked ? (
+                            <>
+                              <span className="inline-flex items-center rounded-md bg-emerald-50 dark:bg-emerald-950/50 border border-emerald-200 dark:border-emerald-800 px-2 py-0.5 text-[11px] font-semibold text-emerald-700 dark:text-emerald-300">
+                                Unlimited
+                              </span>
+                              <div className="text-[11px] text-slate-400 mt-0.5">
+                                Made-to-order · {p.unit}
+                              </div>
+                            </>
+                          ) : (
+                            <>
+                              <span
+                                className={
+                                  isOut
+                                    ? 'text-red-600 dark:text-red-400 font-semibold'
+                                    : isLow
+                                    ? 'text-amber-600 dark:text-amber-400 font-semibold'
+                                    : 'text-slate-900 dark:text-slate-100'
+                                }
+                              >
+                                {p.stock} {p.unit}
+                              </span>
+                              <div className="text-[11px] text-slate-400">
+                                {isOut ? 'Out of stock' : isLow ? 'Low stock' : `Min ${p.minStock}`}
+                              </div>
+                            </>
+                          )}
                         </td>
                         <td className="py-3 px-4 text-right">
                           <div className="inline-flex items-center gap-1">
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setAdjustingProduct(p);
-                                setAdjustReason('restock');
-                                setAdjustQty('10');
-                                setAdjustNote('');
-                              }}
-                              className="rounded-lg px-2.5 py-1.5 text-xs font-medium border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 whitespace-nowrap cursor-pointer"
-                              title="Adjust Stock"
-                            >
-                              <ArrowUpDown className="w-3.5 h-3.5 inline mr-1" />
-                              Stock
-                            </button>
+                            {tracked && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setAdjustingProduct(p);
+                                  setAdjustReason('restock');
+                                  setAdjustQty('10');
+                                  setAdjustNote('');
+                                }}
+                                className="rounded-lg px-2.5 py-1.5 text-xs font-medium border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 whitespace-nowrap cursor-pointer"
+                                title="Adjust Stock"
+                              >
+                                <ArrowUpDown className="w-3.5 h-3.5 inline mr-1" />
+                                Stock
+                              </button>
+                            )}
                             <button
                               type="button"
                               onClick={() => openEditModal(p)}
@@ -763,36 +793,94 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                   />
                 </div>
 
-                <div>
-                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
-                    Opening / Current Stock
-                  </label>
-                  <input
-                    type="number"
-                    required
-                    min="0"
-                    step="any"
-                    value={stock}
-                    onChange={(e) => setStock(e.target.value)}
-                    className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm font-mono tabular-nums text-slate-900 dark:text-slate-100"
-                  />
-                </div>
+                {!isRetail && (
+                  <div className="sm:col-span-2 space-y-1.5">
+                    <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                      Availability &amp; Stock Mode
+                    </label>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setTrackStock(false)}
+                        className={`rounded-lg border px-3 py-2 text-left transition-colors cursor-pointer ${
+                          !trackStock
+                            ? 'brand-border brand-soft-bg'
+                            : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950'
+                        }`}
+                      >
+                        <div
+                          className={`text-xs font-semibold ${
+                            !trackStock ? 'brand-text' : 'text-slate-800 dark:text-slate-100'
+                          }`}
+                        >
+                          Made-to-Order (Unlimited)
+                        </div>
+                        <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                          Freshly cooked dishes — never blocked
+                        </div>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setTrackStock(true);
+                          if (stock === '0' && !editingProduct) setStock('20');
+                          if (minStock === '0' && !editingProduct) setMinStock('5');
+                        }}
+                        className={`rounded-lg border px-3 py-2 text-left transition-colors cursor-pointer ${
+                          trackStock
+                            ? 'brand-border brand-soft-bg'
+                            : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950'
+                        }`}
+                      >
+                        <div
+                          className={`text-xs font-semibold ${
+                            trackStock ? 'brand-text' : 'text-slate-800 dark:text-slate-100'
+                          }`}
+                        >
+                          Track Stock Count
+                        </div>
+                        <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                          Drinks, bottled water &amp; packed items
+                        </div>
+                      </button>
+                    </div>
+                  </div>
+                )}
 
-                <div className="grid grid-cols-2 gap-2">
+                {(isRetail || trackStock) && (
                   <div>
                     <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
-                      Low Alert
+                      Opening / Current Stock
                     </label>
                     <input
                       type="number"
                       required
                       min="0"
                       step="any"
-                      value={minStock}
-                      onChange={(e) => setMinStock(e.target.value)}
+                      value={stock}
+                      onChange={(e) => setStock(e.target.value)}
                       className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm font-mono tabular-nums text-slate-900 dark:text-slate-100"
                     />
                   </div>
+                )}
+
+                <div className={isRetail || trackStock ? 'grid grid-cols-2 gap-2' : 'sm:col-span-2'}>
+                  {(isRetail || trackStock) && (
+                    <div>
+                      <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
+                        Low Alert
+                      </label>
+                      <input
+                        type="number"
+                        required
+                        min="0"
+                        step="any"
+                        value={minStock}
+                        onChange={(e) => setMinStock(e.target.value)}
+                        className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm font-mono tabular-nums text-slate-900 dark:text-slate-100"
+                      />
+                    </div>
+                  )}
                   <div>
                     <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
                       Unit
@@ -803,7 +891,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                       maxLength={BLUEPRINT_LIMITS.UNIT_MAX}
                       value={unit}
                       onChange={(e) => setUnit(e.target.value)}
-                      placeholder="pcs"
+                      placeholder={isRetail ? 'pcs' : 'plate'}
                       className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm text-slate-900 dark:text-slate-100"
                     />
                   </div>
