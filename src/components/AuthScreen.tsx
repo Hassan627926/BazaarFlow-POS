@@ -2,11 +2,13 @@ import React, { useMemo, useState } from 'react';
 import {
   browserLocalPersistence,
   browserSessionPersistence,
+  createUserWithEmailAndPassword,
   inMemoryPersistence,
   sendPasswordResetEmail,
   setPersistence,
   signInWithEmailAndPassword,
   signInWithPopup,
+  updateProfile,
   type User,
 } from 'firebase/auth';
 import {
@@ -18,10 +20,13 @@ import {
   Lock,
   Mail,
   Monitor,
+  Moon,
   Palette,
   Receipt,
   Smartphone,
   Store,
+  Sun,
+  User as UserIcon,
   UtensilsCrossed,
 } from 'lucide-react';
 import { auth, googleProvider } from '../firebase';
@@ -29,15 +34,24 @@ import firebaseConfig from '../../firebase-applet-config.json';
 import { PWAInstallButton } from './PWAInstallButton';
 
 interface AuthScreenProps {
+  darkMode?: boolean;
+  onToggleDarkMode?: () => void;
   onSignedIn?: (user: User, mode: 'owner' | 'waiter') => void;
 }
 
-export const AuthScreen: React.FC<AuthScreenProps> = ({ onSignedIn }) => {
+export const AuthScreen: React.FC<AuthScreenProps> = ({
+  darkMode = false,
+  onToggleDarkMode,
+  onSignedIn,
+}) => {
   const [signingIn, setSigningIn] = useState(false);
   const [emailSigningIn, setEmailSigningIn] = useState(false);
   const [resettingPassword, setResettingPassword] = useState(false);
+  const [authAction, setAuthAction] = useState<'signin' | 'signup'>('signin');
+  const [fullName, setFullName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [errorCode, setErrorCode] = useState<string | null>(null);
@@ -50,11 +64,22 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onSignedIn }) => {
 
   const handleSelectLoginMode = (mode: 'owner' | 'waiter') => {
     setLoginMode(mode);
+    if (mode === 'waiter') {
+      setAuthAction('signin');
+    }
     setError(null);
+    setErrorCode(null);
     setNotice(null);
     if (typeof window !== 'undefined') {
       window.sessionStorage.setItem('bazaarflow_login_mode', mode);
     }
+  };
+
+  const handleSelectAuthAction = (action: 'signin' | 'signup') => {
+    setAuthAction(action);
+    setError(null);
+    setErrorCode(null);
+    setNotice(null);
   };
 
   const firebaseAuthConsoleUrl = `https://console.firebase.google.com/project/${firebaseConfig.projectId}/authentication/providers`;
@@ -79,11 +104,134 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onSignedIn }) => {
     }
   };
 
-  const handleEmailPasswordSignIn = async (e: React.FormEvent) => {
+  const extractFirebaseCode = (err: unknown): string => {
+    if (typeof err === 'object' && err !== null && 'code' in err) {
+      return String((err as { code?: unknown }).code ?? '');
+    }
+    return '';
+  };
+
+  const mapAuthError = (
+    err: unknown,
+    context: 'signin' | 'signup' | 'reset' | 'google'
+  ): { code: string | null; message: string } => {
+    const code = extractFirebaseCode(err);
+
+    if (code === 'auth/email-already-in-use') {
+      return {
+        code,
+        message:
+          'An account with this email already exists. Switch to Sign In or use Forgot password.',
+      };
+    }
+    if (code === 'auth/invalid-email') {
+      return { code, message: 'Please enter a valid email address.' };
+    }
+    if (code === 'auth/weak-password') {
+      return {
+        code,
+        message: 'Please choose a stronger password (at least 6 characters).',
+      };
+    }
+    if (code === 'auth/operation-not-allowed') {
+      return {
+        code,
+        message:
+          'Email/Password sign-in is not enabled yet in Firebase Console. Sign in with Google or enable Email/Password under Authentication → Sign-in method.',
+      };
+    }
+    if (
+      code === 'auth/invalid-credential' ||
+      code === 'auth/wrong-password' ||
+      code === 'auth/user-not-found'
+    ) {
+      if (context === 'reset') {
+        return {
+          code,
+          message:
+            'No account found with this email address. Check the email or switch to Create Account.',
+        };
+      }
+      return {
+        code,
+        message:
+          loginMode === 'waiter'
+            ? 'Incorrect waiter email or password. Confirm your credentials with your restaurant owner.'
+            : 'Incorrect email or password. If you do not have an account yet, switch to Create Account or use Google Sign-In.',
+      };
+    }
+    if (code === 'auth/too-many-requests') {
+      return {
+        code,
+        message: 'Too many failed attempts. Please wait a minute or use Forgot password.',
+      };
+    }
+    if (code === 'auth/network-request-failed') {
+      return {
+        code,
+        message: 'Network error. Please check your internet connection and try again.',
+      };
+    }
+    if (code === 'auth/popup-blocked') {
+      return {
+        code,
+        message:
+          'Browser blocked the Google Sign-In popup. Please allow popups for this site or open the app in a full browser tab.',
+      };
+    }
+    if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
+      return {
+        code,
+        message:
+          'Google Sign-In popup closed before completing login. You can also sign in or create an account with Email & Password.',
+      };
+    }
+    if (code === 'auth/unauthorized-domain') {
+      return {
+        code,
+        message: `This domain (${window.location.hostname}) is not authorized for Google Sign-In in Firebase Auth. Use Email & Password above, or add this domain in Firebase Console → Authentication → Settings → Authorized domains.`,
+      };
+    }
+
+    const fallback =
+      context === 'signup'
+        ? 'Unable to create your account right now. Please try again.'
+        : context === 'reset'
+          ? 'Could not send password reset email right now. Please try again.'
+          : context === 'google'
+            ? 'Google Sign-In failed. Please try again.'
+            : 'Unable to sign in right now. Please try again.';
+
+    return {
+      code: code || null,
+      message: fallback,
+    };
+  };
+
+  const handleEmailAuthSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    const isSignup = loginMode === 'owner' && authAction === 'signup';
     const cleanEmail = email.trim().toLowerCase();
-    if (!cleanEmail || !password) {
-      setError('Please enter both your email address and password.');
+    const cleanName = fullName.trim();
+
+    if (isSignup && cleanName.length < 2) {
+      setError('Please enter your full name (at least 2 characters).');
+      return;
+    }
+    if (!cleanEmail || !cleanEmail.includes('@')) {
+      setError('Please enter a valid email address.');
+      return;
+    }
+    if (!password) {
+      setError('Please enter your password.');
+      return;
+    }
+    if (isSignup && password.length < 6) {
+      setError('Password must be at least 6 characters long.');
+      return;
+    }
+    if (isSignup && password !== confirmPassword) {
+      setError('Passwords do not match. Please check and try again.');
       return;
     }
 
@@ -97,36 +245,28 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onSignedIn }) => {
         window.sessionStorage.setItem('bazaarflow_login_mode', loginMode);
       }
       await ensurePersistence();
-      const credential = await signInWithEmailAndPassword(auth, cleanEmail, password);
-      if (credential?.user && onSignedIn) {
-        onSignedIn(credential.user, loginMode);
+
+      if (isSignup) {
+        const credential = await createUserWithEmailAndPassword(auth, cleanEmail, password);
+        try {
+          await updateProfile(credential.user, { displayName: cleanName });
+          await credential.user.reload();
+        } catch {
+          // Display name update is non-blocking
+        }
+        if (credential?.user && onSignedIn) {
+          onSignedIn(credential.user, 'owner');
+        }
+      } else {
+        const credential = await signInWithEmailAndPassword(auth, cleanEmail, password);
+        if (credential?.user && onSignedIn) {
+          onSignedIn(credential.user, loginMode);
+        }
       }
     } catch (err: unknown) {
-      const code =
-        typeof err === 'object' && err !== null && 'code' in err
-          ? String((err as { code?: unknown }).code ?? '')
-          : '';
-      setErrorCode(code || null);
-
-      if (
-        code === 'auth/invalid-credential' ||
-        code === 'auth/wrong-password' ||
-        code === 'auth/user-not-found'
-      ) {
-        setError(
-          'Incorrect email or password. If you have not created a password yet, sign in with Google first and set your password.'
-        );
-      } else if (code === 'auth/invalid-email') {
-        setError('Please enter a valid email address.');
-      } else if (code === 'auth/operation-not-allowed') {
-        setError(
-          'Email/Password sign-in is not enabled yet in Firebase Console. Sign in with Google or enable Email/Password under Authentication → Sign-in method.'
-        );
-      } else if (code === 'auth/too-many-requests') {
-        setError('Too many failed attempts. Please wait a moment or use Forgot password.');
-      } else {
-        setError(err instanceof Error ? err.message : 'Unable to sign in with email and password.');
-      }
+      const mapped = mapAuthError(err, isSignup ? 'signup' : 'signin');
+      setErrorCode(mapped.code);
+      setError(mapped.message);
     } finally {
       setEmailSigningIn(false);
     }
@@ -148,14 +288,9 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onSignedIn }) => {
       await sendPasswordResetEmail(auth, cleanEmail);
       setNotice(`Password reset link sent to ${cleanEmail}. Check your inbox or spam folder.`);
     } catch (err: unknown) {
-      const code =
-        typeof err === 'object' && err !== null && 'code' in err
-          ? String((err as { code?: unknown }).code ?? '')
-          : '';
-      setErrorCode(code || null);
-      setError(
-        err instanceof Error ? err.message : 'Could not send password reset email. Try Google Sign-In.'
-      );
+      const mapped = mapAuthError(err, 'reset');
+      setErrorCode(mapped.code);
+      setError(mapped.message);
     } finally {
       setResettingPassword(false);
     }
@@ -177,28 +312,9 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onSignedIn }) => {
         onSignedIn(credential.user, loginMode);
       }
     } catch (err: unknown) {
-      const code =
-        typeof err === 'object' && err !== null && 'code' in err
-          ? String((err as { code?: unknown }).code ?? '')
-          : '';
-      const rawMsg = err instanceof Error ? err.message : 'Sign-in failed. Please try again.';
-      setErrorCode(code || null);
-
-      if (code === 'auth/popup-blocked') {
-        setError(
-          'Browser blocked the Google Sign-In popup. Please allow popups for this site or open the app in a full browser tab.'
-        );
-      } else if (code === 'auth/popup-closed-by-user') {
-        setError(
-          'Google Sign-In popup closed before completing login. If you clicked Continue inside an embedded preview, open the app in a new browser tab and try signing in there.'
-        );
-      } else if (code === 'auth/unauthorized-domain') {
-        setError(
-          `This domain (${window.location.hostname}) is not authorized in Firebase Auth. Open the app from its preview URL or add the domain in Firebase Console → Authentication → Settings → Authorized domains.`
-        );
-      } else {
-        setError(rawMsg);
-      }
+      const mapped = mapAuthError(err, 'google');
+      setErrorCode(mapped.code);
+      setError(mapped.message);
     } finally {
       setSigningIn(false);
     }
@@ -207,8 +323,8 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onSignedIn }) => {
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-slate-950 flex flex-col">
       <header className="w-full border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">
-        <div className="mx-auto max-w-6xl flex items-center justify-between gap-8 px-6 py-4">
-          <div className="text-lg font-bold tracking-tight font-display text-slate-900 dark:text-slate-100 whitespace-nowrap shrink-0">
+        <div className="mx-auto max-w-6xl flex items-center justify-between gap-4 sm:gap-8 px-4 sm:px-6 py-3.5 sm:py-4">
+          <div className="text-base sm:text-lg font-bold tracking-tight font-display text-slate-900 dark:text-slate-100 whitespace-nowrap shrink-0">
             BazaarFlow POS
           </div>
           <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-600 dark:text-slate-400">
@@ -222,13 +338,25 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onSignedIn }) => {
               Owner Analytics
             </a>
           </nav>
-          <div className="shrink-0">
+          <div className="flex items-center gap-2 shrink-0">
+            {onToggleDarkMode && (
+              <button
+                type="button"
+                onClick={onToggleDarkMode}
+                className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-2.5 py-2 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+                aria-label={darkMode ? 'Switch to light mode' : 'Switch to dark mode'}
+                title={darkMode ? 'Switch to light mode' : 'Switch to dark mode'}
+              >
+                {darkMode ? <Sun className="w-3.5 h-3.5" /> : <Moon className="w-3.5 h-3.5" />}
+                <span className="hidden sm:inline">{darkMode ? 'Light' : 'Dark'}</span>
+              </button>
+            )}
             <PWAInstallButton compact />
           </div>
         </div>
       </header>
 
-      <main className="flex-1 mx-auto max-w-6xl w-full px-6 py-10 lg:py-14 grid grid-cols-1 lg:grid-cols-12 gap-10 items-center">
+      <main className="flex-1 mx-auto max-w-6xl w-full px-4 sm:px-6 py-5 sm:py-10 lg:py-14 grid grid-cols-1 lg:grid-cols-12 gap-8 lg:gap-10 items-center">
         <div className="lg:col-span-7 space-y-6">
           <p className="text-sm font-medium text-slate-500 dark:text-slate-400">
             Multi-Brand SaaS Point of Sale · Windows · Android · iOS Ready
@@ -290,8 +418,8 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onSignedIn }) => {
           </div>
         </div>
 
-        <div className="lg:col-span-5">
-          <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-6 sm:p-7">
+        <div className="lg:col-span-5 order-first lg:order-last">
+          <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 sm:p-7">
             {/* Owner vs Waiter Login Mode Switch */}
             <div className="grid grid-cols-2 gap-1 p-1 rounded-lg bg-slate-100 dark:bg-slate-800 mb-5">
               <button
@@ -321,13 +449,47 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onSignedIn }) => {
             </div>
 
             <h2 className="text-xl font-bold font-display text-slate-900 dark:text-slate-100">
-              {loginMode === 'waiter' ? 'Waiter Mobile App Sign-In' : 'Sign in to Owner Console'}
+              {loginMode === 'waiter'
+                ? 'Waiter Mobile App Sign-In'
+                : authAction === 'signup'
+                  ? 'Create Owner Account'
+                  : 'Sign in to Owner Console'}
             </h2>
             <p className="mt-1.5 text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
               {loginMode === 'waiter'
                 ? 'Sign in with the Email & Password created by your restaurant owner (under Employees / Staff). Your restaurant tables & menu will open directly.'
-                : 'Sign in with your email & password, or continue with Google on your first login to set a password.'}
+                : authAction === 'signup'
+                  ? 'Create your BazaarFlow POS owner account with email & password, then set up your shop or restaurant in seconds.'
+                  : 'Sign in with your email & password, create a new account, or continue with Google.'}
             </p>
+
+            {/* Sign In vs Create Account Toggle (Owner mode only) */}
+            {loginMode === 'owner' && (
+              <div className="mt-4 flex items-center gap-4 border-b border-slate-200 dark:border-slate-800 text-xs font-semibold">
+                <button
+                  type="button"
+                  onClick={() => handleSelectAuthAction('signin')}
+                  className={`pb-2 border-b-2 transition-colors cursor-pointer ${
+                    authAction === 'signin'
+                      ? 'border-slate-900 dark:border-slate-100 text-slate-900 dark:text-slate-100'
+                      : 'border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'
+                  }`}
+                >
+                  Sign In
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleSelectAuthAction('signup')}
+                  className={`pb-2 border-b-2 transition-colors cursor-pointer ${
+                    authAction === 'signup'
+                      ? 'border-slate-900 dark:border-slate-100 text-slate-900 dark:text-slate-100'
+                      : 'border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'
+                  }`}
+                >
+                  Create Account
+                </button>
+              </div>
+            )}
 
             {error && (
               <div className="mt-4 rounded-lg border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/40 px-3.5 py-3 text-xs text-red-700 dark:text-red-300 space-y-1.5">
@@ -355,8 +517,32 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onSignedIn }) => {
               </div>
             )}
 
-            {/* Email & Password Sign-In Form */}
-            <form onSubmit={(e) => void handleEmailPasswordSignIn(e)} className="mt-5 space-y-3">
+            {/* Email & Password Sign-In / Sign-Up Form */}
+            <form onSubmit={(e) => void handleEmailAuthSubmit(e)} className="mt-4 space-y-3">
+              {loginMode === 'owner' && authAction === 'signup' && (
+                <div>
+                  <label
+                    htmlFor="auth-fullname"
+                    className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1"
+                  >
+                    Your Full Name
+                  </label>
+                  <div className="relative">
+                    <UserIcon className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                    <input
+                      id="auth-fullname"
+                      type="text"
+                      required
+                      autoComplete="name"
+                      value={fullName}
+                      onChange={(e) => setFullName(e.target.value)}
+                      placeholder="e.g., Hassan Ashfaq"
+                      className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 pl-9 pr-3 py-2.5 text-sm text-slate-900 dark:text-slate-100"
+                    />
+                  </div>
+                </div>
+              )}
+
               <div>
                 <label
                   htmlFor="auth-email"
@@ -387,14 +573,16 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onSignedIn }) => {
                   >
                     Password
                   </label>
-                  <button
-                    type="button"
-                    disabled={resettingPassword}
-                    onClick={() => void handleForgotPassword()}
-                    className="text-[11px] font-medium text-teal-700 dark:text-teal-400 hover:underline cursor-pointer disabled:opacity-50"
-                  >
-                    {resettingPassword ? 'Sending...' : 'Forgot password?'}
-                  </button>
+                  {authAction === 'signin' && (
+                    <button
+                      type="button"
+                      disabled={resettingPassword}
+                      onClick={() => void handleForgotPassword()}
+                      className="text-[11px] font-medium text-teal-700 dark:text-teal-400 hover:underline cursor-pointer disabled:opacity-50"
+                    >
+                      {resettingPassword ? 'Sending...' : 'Forgot password?'}
+                    </button>
+                  )}
                 </div>
                 <div className="relative">
                   <Lock className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
@@ -402,10 +590,13 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onSignedIn }) => {
                     id="auth-password"
                     type={showPassword ? 'text' : 'password'}
                     required
-                    autoComplete="current-password"
+                    minLength={authAction === 'signup' ? 6 : undefined}
+                    autoComplete={authAction === 'signup' ? 'new-password' : 'current-password'}
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
-                    placeholder="Enter your password"
+                    placeholder={
+                      authAction === 'signup' ? 'At least 6 characters' : 'Enter your password'
+                    }
                     className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 pl-9 pr-10 py-2.5 text-sm text-slate-900 dark:text-slate-100"
                   />
                   <button
@@ -419,6 +610,31 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onSignedIn }) => {
                 </div>
               </div>
 
+              {loginMode === 'owner' && authAction === 'signup' && (
+                <div>
+                  <label
+                    htmlFor="auth-confirm-password"
+                    className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1"
+                  >
+                    Confirm Password
+                  </label>
+                  <div className="relative">
+                    <Lock className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                    <input
+                      id="auth-confirm-password"
+                      type={showPassword ? 'text' : 'password'}
+                      required
+                      minLength={6}
+                      autoComplete="new-password"
+                      value={confirmPassword}
+                      onChange={(e) => setConfirmPassword(e.target.value)}
+                      placeholder="Re-enter your password"
+                      className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 pl-9 pr-3 py-2.5 text-sm text-slate-900 dark:text-slate-100"
+                    />
+                  </div>
+                </div>
+              )}
+
               <button
                 type="submit"
                 disabled={emailSigningIn || signingIn}
@@ -426,10 +642,14 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onSignedIn }) => {
               >
                 <span>
                   {emailSigningIn
-                    ? 'Signing in...'
+                    ? loginMode === 'owner' && authAction === 'signup'
+                      ? 'Creating Account...'
+                      : 'Signing in...'
                     : loginMode === 'waiter'
                       ? 'Waiter Sign In with Email'
-                      : 'Sign In with Email'}
+                      : authAction === 'signup'
+                        ? 'Create Account & Continue'
+                        : 'Sign In with Email'}
                 </span>
               </button>
             </form>
@@ -441,7 +661,9 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onSignedIn }) => {
               </div>
               <div className="relative flex justify-center text-[11px]">
                 <span className="bg-white dark:bg-slate-900 px-2.5 text-slate-400">
-                  or first-time sign in with Google
+                  {loginMode === 'waiter'
+                    ? 'or if your owner invited your Gmail'
+                    : 'or continue with Google'}
                 </span>
               </div>
             </div>

@@ -183,12 +183,22 @@ function POSWorkspace() {
   useEffect(() => {
     if (!authReady || !user || !user.email || !storesLoaded || !waiterGrantsLoaded) return;
     if (hasPasswordProvider || onboardingRequired) return;
+    if (preferWaiterMode && !waiterGrants.some((g) => g.active)) return;
     const dismissKey = `bazaarflow_pwd_prompt_dismissed_${user.uid}`;
     if (typeof window !== 'undefined' && window.sessionStorage.getItem(dismissKey) === '1') {
       return;
     }
     setPasswordModalOpen(true);
-  }, [authReady, user, storesLoaded, waiterGrantsLoaded, hasPasswordProvider, onboardingRequired]);
+  }, [
+    authReady,
+    user,
+    storesLoaded,
+    waiterGrantsLoaded,
+    hasPasswordProvider,
+    onboardingRequired,
+    preferWaiterMode,
+    waiterGrants,
+  ]);
 
   const handleClosePasswordModal = () => {
     if (user && typeof window !== 'undefined') {
@@ -880,6 +890,8 @@ function POSWorkspace() {
     return (
       <>
         <AuthScreen
+          darkMode={darkMode}
+          onToggleDarkMode={() => setDarkMode((v) => !v)}
           onSignedIn={(signedInUser, mode) => {
             if (typeof window !== 'undefined') {
               window.sessionStorage.setItem('bazaarflow_login_mode', mode);
@@ -1026,20 +1038,20 @@ function POSWorkspace() {
             >
               Sign Out / Switch Account
             </button>
-            {stores.length > 0 && (
-              <button
-                type="button"
-                onClick={() => {
-                  if (typeof window !== 'undefined') {
-                    window.sessionStorage.setItem('bazaarflow_login_mode', 'owner');
-                  }
-                  setPreferWaiterMode(false);
-                }}
-                className="w-full rounded-lg border border-slate-200 dark:border-slate-700 px-4 py-2.5 text-xs font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
-              >
-                Open My Owner Console Instead
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={() => {
+                if (typeof window !== 'undefined') {
+                  window.sessionStorage.setItem('bazaarflow_login_mode', 'owner');
+                }
+                setPreferWaiterMode(false);
+              }}
+              className="w-full rounded-lg border border-slate-200 dark:border-slate-700 px-4 py-2.5 text-xs font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
+            >
+              {stores.length > 0
+                ? 'Open My Owner Console Instead'
+                : "I'm an Owner — Create Brand Workspace"}
+            </button>
           </div>
         </div>
         <OfflineIndicator />

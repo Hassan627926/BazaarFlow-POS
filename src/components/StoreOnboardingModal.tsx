@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Store, UtensilsCrossed, X } from 'lucide-react';
+import { CheckCircle2, Store, UtensilsCrossed, X } from 'lucide-react';
 import { BLUEPRINT_LIMITS, type BusinessType } from '../types';
 import { CURRENCY_OPTIONS, THEME_PRESETS } from '../utils/posHelpers';
 
@@ -42,6 +42,32 @@ export const StoreOnboardingModal: React.FC<StoreOnboardingModalProps> = ({
 
   if (!isOpen) return null;
 
+  const formatStoreCreateError = (err: unknown): string => {
+    const raw = err instanceof Error ? err.message : String(err ?? '');
+    let extracted = raw;
+    if (raw.trim().startsWith('{')) {
+      try {
+        const parsed = JSON.parse(raw) as { error?: unknown };
+        if (typeof parsed.error === 'string' && parsed.error.trim()) {
+          extracted = parsed.error.trim();
+        }
+      } catch {
+        // Keep raw if not valid JSON
+      }
+    }
+    const lower = extracted.toLowerCase();
+    if (lower.includes('permission') || lower.includes('insufficient')) {
+      return 'Permission denied while creating your store. Please sign out and sign in again, then retry.';
+    }
+    if (lower.includes('quota')) {
+      return 'Database daily quota exceeded. Please try again later or check your Firebase plan.';
+    }
+    if (lower.includes('offline') || lower.includes('network') || lower.includes('unavailable')) {
+      return 'You appear to be offline or unable to reach the server. Check your internet connection and try again.';
+    }
+    return extracted || 'Unable to create store right now. Please try again.';
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const trimmedName = name.trim();
@@ -73,7 +99,7 @@ export const StoreOnboardingModal: React.FC<StoreOnboardingModalProps> = ({
       setAddress('');
       setPhone('');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unable to create store.');
+      setError(formatStoreCreateError(err));
     } finally {
       setSubmitting(false);
     }
@@ -81,99 +107,124 @@ export const StoreOnboardingModal: React.FC<StoreOnboardingModalProps> = ({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/65 p-4 overflow-y-auto"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/65 p-3 sm:p-4"
       role="dialog"
       aria-modal="true"
     >
-      <div className="w-full max-w-xl rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-6 shadow-2xl my-auto">
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <h2 className="text-xl font-bold font-display text-slate-900 dark:text-slate-100">
-              Create Brand Workspace
-            </h2>
-            <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
-              Each shop or restaurant gets its own branding, theme colors, inventory, and billing mode.
-            </p>
-          </div>
-          {canClose && (
-            <button
-              type="button"
-              onClick={onClose}
-              className="rounded-lg p-2 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
-              aria-label="Close modal"
-            >
-              <X className="w-4 h-4" />
-            </button>
+      <div className="w-full max-w-xl max-h-[92dvh] flex flex-col overflow-hidden rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-2xl">
+        <div className="shrink-0 border-b border-slate-200 dark:border-slate-800 px-5 sm:px-6 pt-5 pb-4 space-y-3">
+          {!canClose && (
+            <div className="flex items-center gap-2 text-xs font-medium">
+              <span className="inline-flex items-center gap-1.5 text-emerald-700 dark:text-emerald-400">
+                <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                <span>1. Account Ready</span>
+              </span>
+              <span className="h-px flex-1 bg-slate-200 dark:bg-slate-800" />
+              <span className="inline-flex items-center gap-1.5 font-semibold text-slate-900 dark:text-slate-100">
+                <span
+                  className="w-4 h-4 rounded-full text-[10px] font-bold text-white flex items-center justify-center shrink-0"
+                  style={{ backgroundColor: primaryColor }}
+                >
+                  2
+                </span>
+                <span>2. Setup Brand Workspace</span>
+              </span>
+            </div>
           )}
+
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <h2 className="text-lg sm:text-xl font-bold font-display text-slate-900 dark:text-slate-100">
+                {canClose ? 'Add Brand / Outlet' : 'Create Your First Brand Workspace'}
+              </h2>
+              <p className="mt-1 text-xs sm:text-sm text-slate-600 dark:text-slate-400">
+                Each shop or restaurant gets its own branding, theme colors, inventory, and billing mode.
+              </p>
+            </div>
+            {canClose && (
+              <button
+                type="button"
+                onClick={onClose}
+                className="rounded-lg p-2 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer shrink-0"
+                aria-label="Close modal"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            )}
+          </div>
         </div>
 
-        <form onSubmit={handleSubmit} className="mt-5 space-y-5">
-          <div>
-            <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-2">
-              Business Type
-            </label>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <button
-                type="button"
-                onClick={() => setBusinessType('retail')}
-                className={`flex flex-col items-start text-left rounded-lg border p-3.5 transition-colors cursor-pointer ${
-                  businessType === 'retail'
-                    ? 'border-slate-900 dark:border-slate-100 bg-slate-50 dark:bg-slate-800'
-                    : 'border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/50'
-                }`}
-              >
-                <div className="flex items-center gap-2 text-sm font-semibold text-slate-900 dark:text-slate-100">
-                  <Store className="w-4 h-4" />
-                  <span>Retail / Shop</span>
-                </div>
-                <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                  Includes EAN-13 Barcode generator, label printing & scanner checkout.
-                </p>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setBusinessType('restaurant')}
-                className={`flex flex-col items-start text-left rounded-lg border p-3.5 transition-colors cursor-pointer ${
-                  businessType === 'restaurant'
-                    ? 'border-slate-900 dark:border-slate-100 bg-slate-50 dark:bg-slate-800'
-                    : 'border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/50'
-                }`}
-              >
-                <div className="flex items-center gap-2 text-sm font-semibold text-slate-900 dark:text-slate-100">
-                  <UtensilsCrossed className="w-4 h-4" />
-                  <span>Restaurant / Cafe</span>
-                </div>
-                <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                  Table numbers, Dine-In / Takeaway / Delivery & KOT printing (no barcodes).
-                </p>
-              </button>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div className="sm:col-span-2">
-              <label
-                htmlFor="store-name-input"
-                className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5"
-              >
-                Brand / Shop Name
+        <form onSubmit={handleSubmit} className="flex-1 min-h-0 flex flex-col">
+          <div className="flex-1 overflow-y-auto px-5 sm:px-6 py-5 space-y-5">
+            <div>
+              <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-2">
+                Business Type
               </label>
-              <input
-                id="store-name-input"
-                type="text"
-                required
-                maxLength={BLUEPRINT_LIMITS.STORE_NAME_MAX}
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder={
-                  businessType === 'retail'
-                    ? 'e.g., Al-Madina Super Mart'
-                    : 'e.g., Spice Courtyard Kitchen'
-                }
-                className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-3.5 py-2.5 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-slate-900 dark:focus:ring-slate-300"
-              />
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <button
+                  type="button"
+                  onClick={() => setBusinessType('retail')}
+                  className={`flex flex-col items-start text-left rounded-lg border p-3.5 transition-colors cursor-pointer ${
+                    businessType === 'retail'
+                      ? 'border-slate-900 dark:border-slate-100 bg-slate-50 dark:bg-slate-800'
+                      : 'border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/50'
+                  }`}
+                >
+                  <div className="flex items-center gap-2 text-sm font-semibold text-slate-900 dark:text-slate-100">
+                    <Store className="w-4 h-4" />
+                    <span>Retail / Shop</span>
+                  </div>
+                  <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                    Includes EAN-13 Barcode generator, label printing & scanner checkout.
+                  </p>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setBusinessType('restaurant')}
+                  className={`flex flex-col items-start text-left rounded-lg border p-3.5 transition-colors cursor-pointer ${
+                    businessType === 'restaurant'
+                      ? 'border-slate-900 dark:border-slate-100 bg-slate-50 dark:bg-slate-800'
+                      : 'border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/50'
+                  }`}
+                >
+                  <div className="flex items-center gap-2 text-sm font-semibold text-slate-900 dark:text-slate-100">
+                    <UtensilsCrossed className="w-4 h-4" />
+                    <span>Restaurant / Cafe</span>
+                  </div>
+                  <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                    Table numbers, Dine-In / Takeaway / Delivery & KOT printing (no barcodes).
+                  </p>
+                </button>
+              </div>
             </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="sm:col-span-2">
+                <label
+                  htmlFor="store-name-input"
+                  className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5"
+                >
+                  Brand / Shop Name <span className="text-red-500">*</span>
+                </label>
+                <input
+                  id="store-name-input"
+                  type="text"
+                  required
+                  maxLength={BLUEPRINT_LIMITS.STORE_NAME_MAX}
+                  value={name}
+                  onChange={(e) => {
+                    setName(e.target.value);
+                    if (error) setError(null);
+                  }}
+                  placeholder={
+                    businessType === 'retail'
+                      ? 'e.g., Al-Madina Super Mart'
+                      : 'e.g., Spice Courtyard Kitchen'
+                  }
+                  className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-3.5 py-2.5 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-slate-900 dark:focus:ring-slate-300"
+                />
+              </div>
 
             <div>
               <label
@@ -303,25 +354,31 @@ export const StoreOnboardingModal: React.FC<StoreOnboardingModalProps> = ({
               {error}
             </div>
           )}
+          </div>
 
-          <div className="flex items-center justify-end gap-3 pt-2">
-            {canClose && (
+          <div className="shrink-0 border-t border-slate-200 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-900/95 px-5 sm:px-6 py-3.5 flex flex-col-reverse sm:flex-row sm:items-center sm:justify-between gap-2.5">
+            <span className="text-[11px] text-slate-500 dark:text-slate-400 text-center sm:text-left">
+              You can edit phone, address & theme colors anytime in Settings.
+            </span>
+            <div className="flex items-center justify-end gap-2.5">
+              {canClose && (
+                <button
+                  type="button"
+                  onClick={onClose}
+                  className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-4 py-2.5 text-sm font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
+                >
+                  Cancel
+                </button>
+              )}
               <button
-                type="button"
-                onClick={onClose}
-                className="rounded-lg border border-slate-200 dark:border-slate-700 px-4 py-2.5 text-sm font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
+                type="submit"
+                disabled={submitting}
+                className="w-full sm:w-auto rounded-lg px-5 py-2.5 text-sm font-semibold text-white transition-opacity disabled:opacity-60 cursor-pointer"
+                style={{ backgroundColor: primaryColor }}
               >
-                Cancel
+                {submitting ? 'Creating Workspace...' : 'Launch POS Workspace'}
               </button>
-            )}
-            <button
-              type="submit"
-              disabled={submitting}
-              className="rounded-lg px-5 py-2.5 text-sm font-semibold text-white transition-opacity disabled:opacity-60 cursor-pointer"
-              style={{ backgroundColor: primaryColor }}
-            >
-              {submitting ? 'Creating Workspace...' : 'Launch POS Workspace'}
-            </button>
+            </div>
           </div>
         </form>
       </div>
