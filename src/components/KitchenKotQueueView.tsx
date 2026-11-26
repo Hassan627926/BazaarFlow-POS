@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
+  AlertTriangle,
   Bell,
   BellOff,
   Check,
@@ -13,6 +14,7 @@ import {
   Trash2,
   UtensilsCrossed,
   Volume2,
+  X,
   Zap,
 } from 'lucide-react';
 import type { KotKitchenStatus, KotTicket, StoreConfig } from '../types';
@@ -94,6 +96,7 @@ export const KitchenKotQueueView: React.FC<KitchenKotQueueViewProps> = ({
   const [bellStatus, setBellStatus] = useState<'idle' | 'played' | 'blocked'>('idle');
   const [statusFilter, setStatusFilter] = useState<'all' | 'preparing' | 'ready' | 'pending_print'>('all');
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
+  const [actionError, setActionError] = useState<string | null>(null);
 
   useEffect(() => {
     const id = window.setInterval(() => setNowMs(Date.now()), 30000);
@@ -184,8 +187,18 @@ export const KitchenKotQueueView: React.FC<KitchenKotQueueViewProps> = ({
 
   const handleKitchenAction = async (ticketId: string, nextStatus: KotKitchenStatus) => {
     setBusyId(ticketId);
+    setActionError(null);
     try {
       await onUpdateKitchenStatus(ticketId, nextStatus);
+    } catch (err) {
+      const rawMsg = err instanceof Error ? err.message : String(err ?? '');
+      if (rawMsg.toLowerCase().includes('permission')) {
+        setActionError(
+          'Firestore security rules update required: please publish the latest firestore.rules in Firebase Console → Firestore Database → Rules so Mark Ready / Mark Served updates are allowed.'
+        );
+      } else {
+        setActionError(rawMsg || 'Unable to update kitchen order status.');
+      }
     } finally {
       setBusyId(null);
     }
@@ -203,6 +216,23 @@ export const KitchenKotQueueView: React.FC<KitchenKotQueueViewProps> = ({
 
   return (
     <div className="space-y-5">
+      {actionError && (
+        <div className="rounded-xl border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/40 px-4 py-3 flex items-start justify-between gap-3 text-xs text-red-800 dark:text-red-200">
+          <div className="flex items-start gap-2.5 min-w-0">
+            <AlertTriangle className="w-4 h-4 text-red-600 dark:text-red-400 shrink-0 mt-0.5" />
+            <span className="leading-relaxed">{actionError}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setActionError(null)}
+            className="rounded-lg p-1 text-red-600 dark:text-red-300 hover:bg-red-100 dark:hover:bg-red-900/50 cursor-pointer shrink-0"
+            aria-label="Dismiss error"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
       {/* Live Kitchen Status & Print KPI Strip */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-4">
         <div

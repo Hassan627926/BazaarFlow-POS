@@ -1667,7 +1667,7 @@ function POSWorkspace() {
                   onPrintTicket={handlePrintKotTicket}
                   onMarkPrinted={handleMarkKotPrinted}
                   onUpdateKitchenStatus={(kotId, nextStatus) =>
-                    handleUpdateKotKitchenStatus(activeStore.id, kotId, nextStatus, false)
+                    handleUpdateKotKitchenStatus(activeStore.id, kotId, nextStatus, true)
                   }
                   onClearPrinted={handleClearPrintedKots}
                   onTestBell={playKitchenBellChime}
