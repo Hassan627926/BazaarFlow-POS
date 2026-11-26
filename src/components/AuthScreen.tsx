@@ -210,6 +210,9 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
 
   const handleEmailAuthSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (typeof document !== 'undefined' && document.activeElement instanceof HTMLElement) {
+      document.activeElement.blur();
+    }
     const isSignup = loginMode === 'owner' && authAction === 'signup';
     const cleanEmail = email.trim().toLowerCase();
     const cleanName = fullName.trim();
