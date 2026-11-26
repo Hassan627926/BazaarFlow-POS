@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import {
   ArrowLeft,
+  ArrowRightLeft,
   Banknote,
   Check,
   CreditCard,
@@ -15,6 +16,7 @@ import {
   Receipt,
   Search,
   ShoppingBag,
+  StickyNote,
   Store,
   Sun,
   Trash2,
@@ -31,6 +33,7 @@ import {
   type PaymentMethod,
   type PrintJob,
   type Product,
+  type ProductVariant,
   type Sale,
   type SaleItem,
   type StoreConfig,
@@ -38,11 +41,14 @@ import {
   type WaiterAccess,
 } from '../types';
 import {
+  formatDishNameWithVariant,
   formatMoney,
   generateInvoiceNumber,
   generateSafeId,
+  getLineItemKey,
   getTodayDateKey,
   isProductStockTracked,
+  KITCHEN_QUICK_NOTES,
 } from '../utils/posHelpers';
 import { PWAInstallButton } from './PWAInstallButton';
 
@@ -65,22 +71,63 @@ interface WaiterOrderViewProps {
   onPrintJob: (job: PrintJob) => void;
 }
 
+function buildCleanSaleItem(params: {
+  productId: string;
+  name: string;
+  variantId?: string;
+  variantName?: string;
+  note?: string;
+  quantity: number;
+  unitPrice: number;
+  costPrice: number;
+  sku: string;
+  barcode: string;
+}): SaleItem {
+  const item: SaleItem = {
+    productId: params.productId,
+    name: params.name,
+    quantity: params.quantity,
+    unitPrice: params.unitPrice,
+    costPrice: params.costPrice,
+    lineTotal: Number((params.unitPrice * params.quantity).toFixed(2)),
+    sku: params.sku,
+    barcode: params.barcode,
+  };
+  if (params.variantId) item.variantId = params.variantId;
+  if (params.variantName) item.variantName = params.variantName;
+  const cleanNote = (params.note || '').trim().slice(0, BLUEPRINT_LIMITS.KITCHEN_NOTE_MAX);
+  if (cleanNote) item.note = cleanNote;
+  return item;
+}
+
 function mergeSaleItems(existing: SaleItem[], additions: SaleItem[]): SaleItem[] {
   const map = new Map<string, SaleItem>();
   for (const item of existing) {
-    map.set(item.productId, { ...item });
-  }
-  for (const add of additions) {
-    const prev = map.get(add.productId);
+    const key = getLineItemKey(item);
+    const prev = map.get(key);
     if (prev) {
-      const nextQty = prev.quantity + add.quantity;
-      map.set(add.productId, {
+      const nextQty = prev.quantity + item.quantity;
+      map.set(key, {
         ...prev,
         quantity: nextQty,
         lineTotal: Number((prev.unitPrice * nextQty).toFixed(2)),
       });
     } else {
-      map.set(add.productId, { ...add });
+      map.set(key, { ...item });
+    }
+  }
+  for (const add of additions) {
+    const key = getLineItemKey(add);
+    const prev = map.get(key);
+    if (prev) {
+      const nextQty = prev.quantity + add.quantity;
+      map.set(key, {
+        ...prev,
+        quantity: nextQty,
+        lineTotal: Number((prev.unitPrice * nextQty).toFixed(2)),
+      });
+    } else {
+      map.set(key, { ...add });
     }
   }
   return Array.from(map.values());
@@ -123,6 +170,24 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
 
   const [editingOrder, setEditingOrder] = useState<boolean>(false);
   const [editItems, setEditItems] = useState<SaleItem[]>([]);
+
+  // Size / Variant & Kitchen Note modals
+  const [pickerProduct, setPickerProduct] = useState<Product | null>(null);
+  const [pickerVariantId, setPickerVariantId] = useState<string>('');
+  const [pickerNote, setPickerNote] = useState<string>('');
+  const [pickerQty, setPickerQty] = useState<number>(1);
+  const [noteTarget, setNoteTarget] = useState<{
+    mode: 'cart' | 'edit';
+    lineKey: string;
+    title: string;
+  } | null>(null);
+  const [noteDraft, setNoteDraft] = useState<string>('');
+
+  // Table Transfer / Merge modal state
+  const [transferModalOpen, setTransferModalOpen] = useState<boolean>(false);
+  const [transferTargetTable, setTransferTargetTable] = useState<string>('');
+  const [transferNotifyKot, setTransferNotifyKot] = useState<boolean>(false);
+  const [transferError, setTransferError] = useState<string | null>(null);
 
   // Waiter Cash / Table Bill Settlement Modal state
   const [billModalOpen, setBillModalOpen] = useState<boolean>(false);
@@ -213,25 +278,34 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
 
   const cartSaleItems = useMemo<SaleItem[]>(
     () =>
-      cart.map((c) => ({
-        productId: c.product.id,
-        name: c.product.name,
-        quantity: c.quantity,
-        unitPrice: c.product.sellingPrice,
-        costPrice: c.product.costPrice,
-        lineTotal: Number((c.product.sellingPrice * c.quantity).toFixed(2)),
-        sku: c.product.sku,
-        barcode: '',
-      })),
+      cart.map((c) => {
+        const unitPrice = c.variant ? c.variant.price : c.product.sellingPrice;
+        const costPrice =
+          c.variant?.costPrice && c.variant.costPrice > 0
+            ? c.variant.costPrice
+            : c.product.costPrice;
+        return buildCleanSaleItem({
+          productId: c.product.id,
+          name: formatDishNameWithVariant(c.product.name, c.variant?.name),
+          variantId: c.variant?.id,
+          variantName: c.variant?.name,
+          note: c.note,
+          quantity: c.quantity,
+          unitPrice,
+          costPrice,
+          sku: c.product.sku,
+          barcode: '',
+        });
+      }),
     [cart]
   );
 
   const cartQtyMap = useMemo(() => {
     const map = new Map<string, number>();
     if (editingOrder) {
-      editItems.forEach((i) => map.set(i.productId, i.quantity));
+      editItems.forEach((i) => map.set(i.productId, (map.get(i.productId) ?? 0) + i.quantity));
     } else {
-      cart.forEach((c) => map.set(c.product.id, c.quantity));
+      cart.forEach((c) => map.set(c.product.id, (map.get(c.product.id) ?? 0) + c.quantity));
     }
     return map;
   }, [editingOrder, editItems, cart]);
@@ -239,25 +313,37 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
   const editDiff = useMemo(() => {
     if (!editingOrder || !activeTableSession) return [];
     const origMap = new Map<string, SaleItem>();
-    activeTableSession.items.forEach((i) => origMap.set(i.productId, i));
+    activeTableSession.items.forEach((i) => {
+      const k = getLineItemKey(i);
+      const prev = origMap.get(k);
+      origMap.set(k, prev ? { ...prev, quantity: prev.quantity + i.quantity } : i);
+    });
     const draftMap = new Map<string, SaleItem>();
-    editItems.forEach((i) => draftMap.set(i.productId, i));
+    editItems.forEach((i) => {
+      const k = getLineItemKey(i);
+      const prev = draftMap.get(k);
+      draftMap.set(k, prev ? { ...prev, quantity: prev.quantity + i.quantity } : i);
+    });
 
-    const allIds = new Set<string>([...origMap.keys(), ...draftMap.keys()]);
+    const allKeys = new Set<string>([...origMap.keys(), ...draftMap.keys()]);
     const diffs: Array<{
+      lineKey: string;
       productId: string;
       name: string;
       delta: number;
       draftQty: number;
     }> = [];
-    allIds.forEach((pid) => {
-      const orig = origMap.get(pid);
-      const draft = draftMap.get(pid);
+    allKeys.forEach((key) => {
+      const orig = origMap.get(key);
+      const draft = draftMap.get(key);
       const delta = (draft?.quantity ?? 0) - (orig?.quantity ?? 0);
       if (delta !== 0) {
+        const baseName = draft?.name || orig?.name || 'Item';
+        const noteSuffix = draft?.note || orig?.note ? ` [${draft?.note || orig?.note}]` : '';
         diffs.push({
-          productId: pid,
-          name: draft?.name || orig?.name || 'Item',
+          lineKey: key,
+          productId: draft?.productId || orig?.productId || '',
+          name: `${baseName}${noteSuffix}`,
           delta,
           draftQty: draft?.quantity ?? 0,
         });
@@ -274,7 +360,11 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
 
   const cartCount = useMemo(() => cart.reduce((a, c) => a + c.quantity, 0), [cart]);
   const cartTotal = useMemo(
-    () => cart.reduce((a, c) => a + c.product.sellingPrice * c.quantity, 0),
+    () =>
+      cart.reduce(
+        (a, c) => a + (c.variant ? c.variant.price : c.product.sellingPrice) * c.quantity,
+        0
+      ),
     [cart]
   );
 
@@ -439,78 +529,271 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
     setErrorMsg(null);
   };
 
-  const handleTapDish = (product: Product, delta: number) => {
+  const addConfiguredDish = (
+    product: Product,
+    variant?: ProductVariant,
+    note?: string,
+    qtyDelta = 1
+  ) => {
     setErrorMsg(null);
+    const cleanNote = (note || '').trim().slice(0, BLUEPRINT_LIMITS.KITCHEN_NOTE_MAX);
+    const unitPrice = variant ? variant.price : product.sellingPrice;
+    const costPrice =
+      variant?.costPrice && variant.costPrice > 0 ? variant.costPrice : product.costPrice;
+    const displayName = formatDishNameWithVariant(product.name, variant?.name);
+    const lineKey = getLineItemKey({
+      productId: product.id,
+      variantId: variant?.id,
+      variantName: variant?.name,
+      note: cleanNote,
+    });
+    const tracked = isProductStockTracked(product);
 
     if (editingOrder && activeTableSession) {
-      const origQty = activeTableSession.items.find((i) => i.productId === product.id)?.quantity ?? 0;
-      const curQty = editItems.find((i) => i.productId === product.id)?.quantity ?? 0;
-      const nextQty = curQty + delta;
-
-      if (delta > 0 && isProductStockTracked(product)) {
-        const netExtra = nextQty - origQty;
-        if (netExtra > product.stock) {
-          setErrorMsg(`Only ${product.stock} extra ${product.unit} available for ${product.name}.`);
-          return;
-        }
-      }
-
-      if (nextQty <= 0) {
-        setEditItems((prev) => prev.filter((i) => i.productId !== product.id));
+      const origTotalQty = activeTableSession.items
+        .filter((i) => i.productId === product.id)
+        .reduce((a, i) => a + i.quantity, 0);
+      const curTotalQty = editItems
+        .filter((i) => i.productId === product.id)
+        .reduce((a, i) => a + i.quantity, 0);
+      if (qtyDelta > 0 && tracked && curTotalQty + qtyDelta - origTotalQty > product.stock) {
+        setErrorMsg(`Only ${product.stock} extra ${product.unit} available for ${product.name}.`);
         return;
       }
 
       setEditItems((prev) => {
-        const exists = prev.find((i) => i.productId === product.id);
+        const exists = prev.find((i) => getLineItemKey(i) === lineKey);
         if (exists) {
-          return prev.map((i) =>
-            i.productId === product.id
-              ? { ...i, quantity: nextQty, lineTotal: Number((i.unitPrice * nextQty).toFixed(2)) }
-              : i
-          );
+          const nextQty = exists.quantity + qtyDelta;
+          return prev
+            .map((i) =>
+              getLineItemKey(i) === lineKey
+                ? { ...i, quantity: nextQty, lineTotal: Number((i.unitPrice * nextQty).toFixed(2)) }
+                : i
+            )
+            .filter((i) => i.quantity > 0);
         }
+        if (qtyDelta <= 0) return prev;
         return [
           ...prev,
-          {
+          buildCleanSaleItem({
             productId: product.id,
-            name: product.name,
-            quantity: nextQty,
-            unitPrice: product.sellingPrice,
-            costPrice: product.costPrice,
-            lineTotal: Number((product.sellingPrice * nextQty).toFixed(2)),
+            name: displayName,
+            variantId: variant?.id,
+            variantName: variant?.name,
+            note: cleanNote,
+            quantity: qtyDelta,
+            unitPrice,
+            costPrice,
             sku: product.sku,
             barcode: '',
-          },
+          }),
         ];
       });
       return;
     }
 
-    // Normal order / add-on cart
-    const tracked = isProductStockTracked(product);
+    const curCartTotal = cart
+      .filter((c) => c.product.id === product.id)
+      .reduce((a, c) => a + c.quantity, 0);
+    if (qtyDelta > 0 && tracked && curCartTotal + qtyDelta > product.stock) {
+      setErrorMsg(
+        product.stock <= 0
+          ? `${product.name} is out of stock.`
+          : `Only ${product.stock} ${product.unit} available for ${product.name}.`
+      );
+      return;
+    }
+
     setCart((prev) => {
-      const existing = prev.find((c) => c.product.id === product.id);
+      const existing = prev.find((c) => c.lineKey === lineKey);
       if (!existing) {
-        if (delta <= 0) return prev;
-        if (tracked && product.stock <= 0) {
-          setErrorMsg(`${product.name} is out of stock.`);
-          return prev;
-        }
-        return [...prev, { product, quantity: 1 }];
+        if (qtyDelta <= 0) return prev;
+        return [
+          ...prev,
+          {
+            lineKey,
+            product,
+            variant,
+            note: cleanNote || undefined,
+            quantity: qtyDelta,
+          },
+        ];
       }
-      const nextQty = existing.quantity + delta;
-      if (tracked && nextQty > product.stock) {
-        setErrorMsg(`Only ${product.stock} ${product.unit} available for ${product.name}.`);
-        return prev;
-      }
+      const nextQty = existing.quantity + qtyDelta;
       if (nextQty <= 0) {
-        return prev.filter((c) => c.product.id !== product.id);
+        return prev.filter((c) => c.lineKey !== lineKey);
       }
-      return prev.map((c) => (c.product.id === product.id ? { ...c, quantity: nextQty } : c));
+      return prev.map((c) => (c.lineKey === lineKey ? { ...c, quantity: nextQty } : c));
     });
   };
 
-  const startEditingExisting = (adjustProductId?: string, delta = 0, removeAll = false) => {
+  const openVariantPicker = (product: Product) => {
+    const firstVar = product.variants && product.variants.length > 0 ? product.variants[0] : null;
+    setPickerProduct(product);
+    setPickerVariantId(firstVar ? firstVar.id : '');
+    setPickerNote('');
+    setPickerQty(1);
+    setErrorMsg(null);
+  };
+
+  const handleConfirmVariantPicker = () => {
+    if (!pickerProduct) return;
+    const selectedVar =
+      pickerProduct.variants?.find((v) => v.id === pickerVariantId) ??
+      pickerProduct.variants?.[0];
+    addConfiguredDish(pickerProduct, selectedVar, pickerNote, pickerQty);
+    setPickerProduct(null);
+    setPickerVariantId('');
+    setPickerNote('');
+    setPickerQty(1);
+  };
+
+  const updateCartLineQty = (lineKey: string, delta: number) => {
+    setErrorMsg(null);
+    const target = cart.find((c) => c.lineKey === lineKey);
+    if (!target) return;
+    if (delta > 0 && isProductStockTracked(target.product)) {
+      const curTotal = cart
+        .filter((c) => c.product.id === target.product.id)
+        .reduce((a, c) => a + c.quantity, 0);
+      if (curTotal + delta > target.product.stock) {
+        setErrorMsg(`Only ${target.product.stock} ${target.product.unit} available for ${target.product.name}.`);
+        return;
+      }
+    }
+    setCart((prev) =>
+      prev
+        .map((c) => (c.lineKey === lineKey ? { ...c, quantity: c.quantity + delta } : c))
+        .filter((c) => c.quantity > 0)
+    );
+  };
+
+  const updateEditLineQty = (lineKey: string, delta: number) => {
+    if (!activeTableSession) return;
+    setErrorMsg(null);
+    const target = editItems.find((i) => getLineItemKey(i) === lineKey);
+    if (!target) return;
+
+    if (delta > 0) {
+      const prod = products.find((p) => p.id === target.productId);
+      const origTotalQty = activeTableSession.items
+        .filter((i) => i.productId === target.productId)
+        .reduce((a, i) => a + i.quantity, 0);
+      const curTotalQty = editItems
+        .filter((i) => i.productId === target.productId)
+        .reduce((a, i) => a + i.quantity, 0);
+      if (prod && isProductStockTracked(prod) && curTotalQty + delta - origTotalQty > prod.stock) {
+        setErrorMsg(`Only ${prod.stock} extra ${prod.unit} available for ${prod.name}.`);
+        return;
+      }
+    }
+
+    setEditItems((prev) =>
+      prev
+        .map((i) => {
+          if (getLineItemKey(i) !== lineKey) return i;
+          const nextQty = i.quantity + delta;
+          return {
+            ...i,
+            quantity: nextQty,
+            lineTotal: Number((i.unitPrice * nextQty).toFixed(2)),
+          };
+        })
+        .filter((i) => i.quantity > 0)
+    );
+  };
+
+  const handleSaveKitchenNote = () => {
+    if (!noteTarget) return;
+    const cleanNote = noteDraft.trim().slice(0, BLUEPRINT_LIMITS.KITCHEN_NOTE_MAX);
+
+    if (noteTarget.mode === 'cart') {
+      setCart((prev) => {
+        const target = prev.find((c) => c.lineKey === noteTarget.lineKey);
+        if (!target) return prev;
+        const nextLineKey = getLineItemKey({
+          productId: target.product.id,
+          variantId: target.variant?.id,
+          variantName: target.variant?.name,
+          note: cleanNote,
+        });
+        const withoutTarget = prev.filter((c) => c.lineKey !== noteTarget.lineKey);
+        const duplicate = withoutTarget.find((c) => c.lineKey === nextLineKey);
+        if (duplicate) {
+          return withoutTarget.map((c) =>
+            c.lineKey === nextLineKey ? { ...c, quantity: c.quantity + target.quantity } : c
+          );
+        }
+        return prev.map((c) =>
+          c.lineKey === noteTarget.lineKey
+            ? { ...c, lineKey: nextLineKey, note: cleanNote || undefined }
+            : c
+        );
+      });
+    } else {
+      setEditItems((prev) => {
+        const target = prev.find((i) => getLineItemKey(i) === noteTarget.lineKey);
+        if (!target) return prev;
+        const updatedItem = buildCleanSaleItem({
+          productId: target.productId,
+          name: target.name,
+          variantId: target.variantId,
+          variantName: target.variantName,
+          note: cleanNote,
+          quantity: target.quantity,
+          unitPrice: target.unitPrice,
+          costPrice: target.costPrice,
+          sku: target.sku,
+          barcode: '',
+        });
+        const nextKey = getLineItemKey(updatedItem);
+        const withoutTarget = prev.filter((i) => getLineItemKey(i) !== noteTarget.lineKey);
+        const duplicate = withoutTarget.find((i) => getLineItemKey(i) === nextKey);
+        if (duplicate) {
+          return withoutTarget.map((i) =>
+            getLineItemKey(i) === nextKey
+              ? {
+                  ...i,
+                  quantity: i.quantity + updatedItem.quantity,
+                  lineTotal: Number((i.unitPrice * (i.quantity + updatedItem.quantity)).toFixed(2)),
+                }
+              : i
+          );
+        }
+        return prev.map((i) => (getLineItemKey(i) === noteTarget.lineKey ? updatedItem : i));
+      });
+    }
+
+    setNoteTarget(null);
+    setNoteDraft('');
+  };
+
+  const handleTapDish = (product: Product, delta: number) => {
+    const hasVariants = Array.isArray(product.variants) && product.variants.length > 0;
+    if (delta > 0 && hasVariants) {
+      openVariantPicker(product);
+      return;
+    }
+    if (delta < 0) {
+      if (editingOrder && activeTableSession) {
+        const match = [...editItems].reverse().find((i) => i.productId === product.id);
+        if (match) updateEditLineQty(getLineItemKey(match), delta);
+      } else {
+        const match = [...cart].reverse().find((c) => c.product.id === product.id);
+        if (match) updateCartLineQty(match.lineKey, delta);
+      }
+      return;
+    }
+    addConfiguredDish(product, undefined, undefined, delta);
+  };
+
+  const startEditingExisting = (
+    adjustLineKey?: string,
+    delta = 0,
+    removeAll = false,
+    openNoteAfter = false
+  ) => {
     if (!activeTableSession || !canEditOrders) return;
     setErrorMsg(null);
     let draft =
@@ -518,35 +801,53 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
         ? mergeSaleItems(activeTableSession.items, cartSaleItems)
         : activeTableSession.items.map((i) => ({ ...i }));
 
-    if (adjustProductId) {
-      if (delta > 0 && !removeAll) {
-        const prod = products.find((p) => p.id === adjustProductId);
-        const origQty =
-          activeTableSession.items.find((i) => i.productId === adjustProductId)?.quantity ?? 0;
-        const curQty = draft.find((i) => i.productId === adjustProductId)?.quantity ?? 0;
-        if (prod && isProductStockTracked(prod) && curQty + delta - origQty > prod.stock) {
+    const targetItem = adjustLineKey
+      ? draft.find((i) => getLineItemKey(i) === adjustLineKey)
+      : undefined;
+
+    if (adjustLineKey) {
+      if (delta > 0 && !removeAll && targetItem) {
+        const prod = products.find((p) => p.id === targetItem.productId);
+        const origTotalQty = activeTableSession.items
+          .filter((i) => i.productId === targetItem.productId)
+          .reduce((a, i) => a + i.quantity, 0);
+        const curTotalQty = draft
+          .filter((i) => i.productId === targetItem.productId)
+          .reduce((a, i) => a + i.quantity, 0);
+        if (prod && isProductStockTracked(prod) && curTotalQty + delta - origTotalQty > prod.stock) {
           setErrorMsg(`Only ${prod.stock} extra ${prod.unit} available for ${prod.name}.`);
           return;
         }
       }
-      draft = removeAll
-        ? draft.filter((i) => i.productId !== adjustProductId)
-        : draft
-            .map((i) => {
-              if (i.productId !== adjustProductId) return i;
-              const nextQty = i.quantity + delta;
-              return {
-                ...i,
-                quantity: nextQty,
-                lineTotal: Number((i.unitPrice * nextQty).toFixed(2)),
-              };
-            })
-            .filter((i) => i.quantity > 0);
+      if (removeAll) {
+        draft = draft.filter((i) => getLineItemKey(i) !== adjustLineKey);
+      } else if (delta !== 0) {
+        draft = draft
+          .map((i) => {
+            if (getLineItemKey(i) !== adjustLineKey) return i;
+            const nextQty = i.quantity + delta;
+            return {
+              ...i,
+              quantity: nextQty,
+              lineTotal: Number((i.unitPrice * nextQty).toFixed(2)),
+            };
+          })
+          .filter((i) => i.quantity > 0);
+      }
     }
 
     setCart([]);
     setEditItems(draft);
     setEditingOrder(true);
+
+    if (openNoteAfter && targetItem && adjustLineKey) {
+      setNoteTarget({
+        mode: 'edit',
+        lineKey: adjustLineKey,
+        title: targetItem.name,
+      });
+      setNoteDraft(targetItem.note || '');
+    }
   };
 
   const handlePrintProformaBill = (session: TableSession) => {
@@ -725,21 +1026,31 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
         });
       }
 
-      cart.forEach((c, idx) => {
+      const trackedByProduct = new Map<string, { product: Product; quantity: number }>();
+      cart.forEach((c) => {
         if (!isProductStockTracked(c.product)) return;
-        const nextStock = Math.max(0, Number((c.product.stock - c.quantity).toFixed(2)));
-        batch.update(doc(db, 'stores', store.id, 'products', c.product.id), {
+        const prev = trackedByProduct.get(c.product.id);
+        trackedByProduct.set(c.product.id, {
+          product: c.product,
+          quantity: (prev?.quantity ?? 0) + c.quantity,
+        });
+      });
+
+      let logIdx = 0;
+      trackedByProduct.forEach(({ product: prod, quantity }) => {
+        const nextStock = Math.max(0, Number((prod.stock - quantity).toFixed(2)));
+        batch.update(doc(db, 'stores', store.id, 'products', prod.id), {
           stock: nextStock,
           updatedAt: serverTimestamp(),
         });
-        const logId = `${generateSafeId('log')}_${idx}`;
+        const logId = `${generateSafeId('log')}_${logIdx++}`;
         batch.set(doc(db, 'stores', store.id, 'stockLogs', logId), {
           ownerId: store.ownerId,
           storeId: store.id,
-          productId: c.product.id,
-          productName: c.product.name.slice(0, BLUEPRINT_LIMITS.PRODUCT_NAME_MAX),
-          change: -c.quantity,
-          previousStock: c.product.stock,
+          productId: prod.id,
+          productName: prod.name.slice(0, BLUEPRINT_LIMITS.PRODUCT_NAME_MAX),
+          change: -quantity,
+          previousStock: prod.stock,
           newStock: nextStock,
           reason: 'sale',
           note: `Waiter ${isAddOn ? 'Add-on' : 'Order'} T-${selectedTable}${
@@ -848,10 +1159,15 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
   const handleSaveEditedOrder = async (printRevised: boolean) => {
     if (!activeTableSession || !editingOrder || !canEditOrders) return;
 
-    for (const d of editDiff) {
-      if (d.delta > 0) {
-        const prod = products.find((p) => p.id === d.productId);
-        if (prod && isProductStockTracked(prod) && prod.stock < d.delta) {
+    const stockDeltaByProduct = new Map<string, number>();
+    editDiff.forEach((d) => {
+      stockDeltaByProduct.set(d.productId, (stockDeltaByProduct.get(d.productId) ?? 0) + d.delta);
+    });
+
+    for (const [pid, netDelta] of stockDeltaByProduct.entries()) {
+      if (netDelta > 0) {
+        const prod = products.find((p) => p.id === pid);
+        if (prod && isProductStockTracked(prod) && prod.stock < netDelta) {
           setErrorMsg(`Only ${prod.stock} extra ${prod.unit} available for ${prod.name}.`);
           return;
         }
@@ -883,29 +1199,31 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
       const batch = writeBatch(db);
       const tableRef = doc(db, 'stores', store.id, 'tables', activeTableSession.id);
 
-      editDiff.forEach((d, idx) => {
-        const prod = products.find((p) => p.id === d.productId);
+      let logIdx = 0;
+      stockDeltaByProduct.forEach((netDelta, pid) => {
+        if (netDelta === 0) return;
+        const prod = products.find((p) => p.id === pid);
         if (!prod || !isProductStockTracked(prod)) return;
         const currentStock = Number.isFinite(Number(prod.stock)) ? Number(prod.stock) : 0;
-        const nextStock = Math.max(0, Number((currentStock - d.delta).toFixed(2)));
+        const nextStock = Math.max(0, Number((currentStock - netDelta).toFixed(2)));
         batch.update(doc(db, 'stores', store.id, 'products', prod.id), {
           stock: nextStock,
           updatedAt: serverTimestamp(),
         });
 
-        const logId = `${generateSafeId('log')}_${idx}`;
+        const logId = `${generateSafeId('log')}_${logIdx++}`;
         batch.set(doc(db, 'stores', store.id, 'stockLogs', logId), {
           ownerId: store.ownerId,
           storeId: store.id,
           productId: prod.id,
           productName: String(prod.name || 'Item').slice(0, BLUEPRINT_LIMITS.PRODUCT_NAME_MAX),
-          change: Number((-d.delta).toFixed(2)),
+          change: Number((-netDelta).toFixed(2)),
           previousStock: currentStock,
           newStock: nextStock,
-          reason: d.delta > 0 ? 'sale' : 'adjustment',
+          reason: netDelta > 0 ? 'sale' : 'adjustment',
           note: (isCancelling
             ? `Waiter cancelled T-${tableNum}${empName ? ` (${empName})` : ''}`
-            : `Waiter edit T-${tableNum} (${d.delta > 0 ? `+${d.delta}` : d.delta})${
+            : `Waiter edit T-${tableNum} (${netDelta > 0 ? `+${netDelta}` : netDelta})${
                 empName ? ` by ${empName}` : ''
               }`
           ).slice(0, BLUEPRINT_LIMITS.STOCK_NOTE_MAX),
@@ -913,21 +1231,20 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
         });
       });
 
-      const sanitizedItems: SaleItem[] = editItems.map((item) => {
-        const qty = Math.max(1, Number(item.quantity) || 1);
-        const unitPrice = Math.max(0, Number(item.unitPrice) || 0);
-        const costPrice = Math.max(0, Number(item.costPrice) || 0);
-        return {
+      const sanitizedItems: SaleItem[] = editItems.map((item) =>
+        buildCleanSaleItem({
           productId: String(item.productId),
           name: String(item.name || 'Item').slice(0, BLUEPRINT_LIMITS.PRODUCT_NAME_MAX),
-          quantity: qty,
-          unitPrice,
-          costPrice,
-          lineTotal: Number((unitPrice * qty).toFixed(2)),
+          variantId: item.variantId,
+          variantName: item.variantName,
+          note: item.note,
+          quantity: Math.max(1, Number(item.quantity) || 1),
+          unitPrice: Math.max(0, Number(item.unitPrice) || 0),
+          costPrice: Math.max(0, Number(item.costPrice) || 0),
           sku: String(item.sku ?? '').slice(0, BLUEPRINT_LIMITS.SKU_MAX),
           barcode: '',
-        };
-      });
+        })
+      );
 
       if (isCancelling) {
         batch.delete(tableRef);
@@ -1043,6 +1360,239 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
         );
       } catch {
         // Already shown
+      }
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const openTransferModal = () => {
+    if (!activeTableSession || editingOrder || !canEditOrders) return;
+    if (cart.length > 0) {
+      setErrorMsg(
+        'Please send your unsaved items to Kitchen (or remove them) before shifting or merging this table.'
+      );
+      return;
+    }
+    const candidates = tableNumbersList.filter((n) => n !== activeTableSession.tableNumber);
+    if (candidates.length === 0) {
+      setErrorMsg('No other tables configured.');
+      return;
+    }
+    const firstEmpty = candidates.find((n) => !tableSessionMap.has(n));
+    setTransferTargetTable(firstEmpty ?? candidates[0]);
+    setTransferNotifyKot(false);
+    setTransferError(null);
+    setTransferModalOpen(true);
+  };
+
+  const handleConfirmTableTransferOrMerge = async () => {
+    if (!activeTableSession || !transferTargetTable || !canEditOrders) return;
+    const sourceSession = activeTableSession;
+    const targetTable = transferTargetTable.trim().slice(0, BLUEPRINT_LIMITS.TABLE_MAX);
+    if (!targetTable || targetTable === sourceSession.tableNumber) {
+      setTransferError('Please select a different target table.');
+      return;
+    }
+
+    const targetSession = tableSessionMap.get(targetTable) ?? null;
+    const isMerge = !!targetSession;
+
+    const sanitizeItem = (item: SaleItem): SaleItem =>
+      buildCleanSaleItem({
+        productId: String(item.productId),
+        name: String(item.name || 'Item').slice(0, BLUEPRINT_LIMITS.PRODUCT_NAME_MAX),
+        variantId: item.variantId,
+        variantName: item.variantName,
+        note: item.note,
+        quantity: Math.max(1, Number(item.quantity) || 1),
+        unitPrice: Math.max(0, Number(item.unitPrice) || 0),
+        costPrice: Math.max(0, Number(item.costPrice) || 0),
+        sku: String(item.sku ?? '').slice(0, BLUEPRINT_LIMITS.SKU_MAX),
+        barcode: '',
+      });
+
+    const sourceItems = sourceSession.items.map(sanitizeItem);
+    const finalItems = targetSession
+      ? mergeSaleItems(targetSession.items.map(sanitizeItem), sourceItems)
+      : sourceItems;
+
+    if (finalItems.length > BLUEPRINT_LIMITS.SALE_ITEMS_MAX) {
+      setTransferError(
+        `Merged bill exceeds maximum ${BLUEPRINT_LIMITS.SALE_ITEMS_MAX} distinct items.`
+      );
+      return;
+    }
+
+    const finalCount = finalItems.reduce((acc, i) => acc + i.quantity, 0);
+    const finalSubtotal = Number(finalItems.reduce((acc, i) => acc + i.lineTotal, 0).toFixed(2));
+    const finalCost = Number(
+      finalItems.reduce((acc, i) => acc + i.costPrice * i.quantity, 0).toFixed(2)
+    );
+
+    const guestParts = [targetSession?.customerName?.trim(), sourceSession.customerName?.trim()].filter(
+      (v): v is string => !!v
+    );
+    const combinedCustomerName = Array.from(new Set(guestParts))
+      .join(' & ')
+      .slice(0, BLUEPRINT_LIMITS.CUSTOMER_NAME_MAX);
+
+    const empId = (targetSession?.employeeId || sourceSession.employeeId || effectiveWaiter.id || '').slice(
+      0,
+      128
+    );
+    const empName = (
+      targetSession?.employeeName ||
+      sourceSession.employeeName ||
+      effectiveWaiter.name ||
+      ''
+    ).slice(0, BLUEPRINT_LIMITS.EMPLOYEE_NAME_MAX);
+
+    const targetTableId = `table_${targetTable.replace(/[^a-zA-Z0-9_\-]/g, '')}`;
+    const targetPath = `stores/${store.id}/tables/${targetTableId}`;
+
+    setSubmitting(true);
+    setTransferError(null);
+    setErrorMsg(null);
+
+    try {
+      const batch = writeBatch(db);
+      const targetRef = doc(db, 'stores', store.id, 'tables', targetTableId);
+
+      if (targetSession) {
+        batch.update(doc(db, 'stores', store.id, 'tables', targetSession.id), {
+          items: finalItems,
+          itemCount: finalCount,
+          subtotal: finalSubtotal,
+          totalCost: finalCost,
+          customerName: combinedCustomerName,
+          employeeId: empId,
+          employeeName: empName,
+          updatedAt: serverTimestamp(),
+        });
+      } else {
+        batch.set(targetRef, {
+          ownerId: store.ownerId,
+          storeId: store.id,
+          tableNumber: targetTable,
+          status: 'occupied',
+          items: finalItems,
+          itemCount: finalCount,
+          subtotal: finalSubtotal,
+          totalCost: finalCost,
+          customerName: combinedCustomerName,
+          employeeId: empId,
+          employeeName: empName,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      }
+
+      batch.delete(doc(db, 'stores', store.id, 'tables', sourceSession.id));
+
+      const changeNotes = [
+        isMerge
+          ? `MERGED: Table ${sourceSession.tableNumber} + Table ${targetTable} -> Table ${targetTable}`
+          : `SHIFTED: Table ${sourceSession.tableNumber} -> Table ${targetTable}`,
+      ];
+      const kotId = transferNotifyKot ? generateSafeId('kot') : '';
+      const ticketNumber = `${isMerge ? 'KOT-MRG' : 'KOT-SHF'}-T${targetTable}-${String(Date.now()).slice(-4)}`;
+
+      if (kotId) {
+        batch.set(doc(db, 'stores', store.id, 'kotQueue', kotId), {
+          ownerId: store.ownerId,
+          storeId: store.id,
+          ticketNumber,
+          tableNumber: targetTable,
+          orderType: 'dine_in',
+          ticketKind: 'revised',
+          items: finalItems,
+          itemCount: finalCount,
+          changeNotes,
+          customerName: combinedCustomerName,
+          employeeId: empId,
+          employeeName: empName,
+          source: waiterGrant ? 'waiter_mobile' : 'counter',
+          status: 'pending',
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      }
+
+      await batch.commit();
+
+      setTransferModalOpen(false);
+      setSelectedTable(targetTable);
+      setGuestName(combinedCustomerName);
+
+      const kotPreview: Sale | null = transferNotifyKot
+        ? {
+            id: kotId || `kot_shift_${Date.now()}`,
+            ownerId: store.ownerId,
+            storeId: store.id,
+            invoiceNumber: ticketNumber,
+            dateKey: getTodayDateKey(),
+            items: finalItems,
+            itemCount: finalCount,
+            subtotal: finalSubtotal,
+            discount: 0,
+            taxRate: 0,
+            taxAmount: 0,
+            total: finalSubtotal,
+            totalCost: 0,
+            profit: 0,
+            paymentMethod: 'cash',
+            amountTendered: 0,
+            changeDue: 0,
+            orderType: 'dine_in',
+            tableNumber: targetTable,
+            customerName: combinedCustomerName,
+            employeeId: empId,
+            employeeName: empName,
+            status: 'completed',
+            createdAt: null,
+            updatedAt: null,
+          }
+        : null;
+
+      const kotJob: Extract<PrintJob, { type: 'kot' }> | null = kotPreview
+        ? {
+            type: 'kot',
+            sale: kotPreview,
+            isRevised: true,
+            changeNotes,
+            kotId: kotId || undefined,
+          }
+        : null;
+
+      if (standalone) {
+        flashNotice(
+          isMerge
+            ? `Table ${sourceSession.tableNumber} merged into Table ${targetTable}${
+                kotJob ? ' — Kitchen KOT sent!' : '!'
+              }`
+            : `Table ${sourceSession.tableNumber} shifted to Table ${targetTable}${
+                kotJob ? ' — Kitchen KOT sent!' : '!'
+              }`,
+          canPrintKot ? kotJob : null
+        );
+      } else {
+        flashNotice(
+          isMerge
+            ? `Table ${sourceSession.tableNumber} merged into Table ${targetTable}!`
+            : `Table ${sourceSession.tableNumber} shifted to Table ${targetTable}!`
+        );
+        if (kotJob && canPrintKot) {
+          onPrintJob(kotJob);
+        }
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Unable to shift or merge table.';
+      setTransferError(`Failed: ${msg}`);
+      try {
+        handleFirestoreError(err, isMerge ? OperationType.UPDATE : OperationType.CREATE, targetPath);
+      } catch {
+        // Surfaced in transferError
       }
     } finally {
       setSubmitting(false);
@@ -1308,6 +1858,16 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
                   {canEditOrders && (
                     <button
                       type="button"
+                      onClick={openTransferModal}
+                      className="inline-flex items-center gap-1 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-2.5 py-1.5 text-xs font-semibold text-slate-800 dark:text-slate-100 hover:bg-slate-50 dark:hover:bg-slate-700 cursor-pointer"
+                    >
+                      <ArrowRightLeft className="w-3.5 h-3.5" />
+                      <span>Shift / Merge</span>
+                    </button>
+                  )}
+                  {canEditOrders && (
+                    <button
+                      type="button"
                       onClick={() => startEditingExisting()}
                       className="inline-flex items-center gap-1 rounded-lg border border-amber-400 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/40 px-2.5 py-1.5 text-xs font-semibold text-amber-900 dark:text-amber-300 cursor-pointer"
                     >
@@ -1350,58 +1910,75 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
                   )}
                 </div>
                 <div className="divide-y divide-amber-200/60 dark:divide-amber-900/40">
-                  {activeTableSession.items.map((item, idx) => (
-                    <div
-                      key={`${item.productId}-${idx}`}
-                      className="py-1.5 flex items-center justify-between gap-2 text-xs"
-                    >
-                      <div className="min-w-0 flex-1">
-                        <span className="font-medium text-slate-900 dark:text-slate-100 truncate block">
-                          {item.name}
-                        </span>
-                        <span className="text-[11px] font-mono text-slate-500 dark:text-slate-400">
-                          {canViewPrices
-                            ? `${formatMoney(item.unitPrice, store.currency)} × ${item.quantity}`
-                            : `Qty: ${item.quantity}`}
-                        </span>
-                      </div>
-                      {canEditOrders ? (
-                        <div className="flex items-center gap-1 shrink-0">
-                          <button
-                            type="button"
-                            onClick={() => startEditingExisting(item.productId, -1)}
-                            className="w-7 h-7 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 flex items-center justify-center text-slate-700 dark:text-slate-200 cursor-pointer"
-                            aria-label={`Reduce ${item.name}`}
-                          >
-                            <Minus className="w-3 h-3" />
-                          </button>
-                          <span className="w-6 text-center font-mono font-bold text-slate-900 dark:text-slate-100">
-                            {item.quantity}
+                  {activeTableSession.items.map((item, idx) => {
+                    const lineKey = getLineItemKey(item);
+                    return (
+                      <div
+                        key={`${lineKey}-${idx}`}
+                        className="py-1.5 flex items-center justify-between gap-2 text-xs"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <span className="font-medium text-slate-900 dark:text-slate-100 truncate block">
+                            {item.name}
                           </span>
-                          <button
-                            type="button"
-                            onClick={() => startEditingExisting(item.productId, 1)}
-                            className="w-7 h-7 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 flex items-center justify-center text-slate-700 dark:text-slate-200 cursor-pointer"
-                            aria-label={`Increase ${item.name}`}
-                          >
-                            <Plus className="w-3 h-3" />
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => startEditingExisting(item.productId, 0, true)}
-                            className="w-7 h-7 rounded-md flex items-center justify-center text-slate-400 hover:text-red-600 cursor-pointer"
-                            aria-label={`Remove ${item.name}`}
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
+                          <span className="text-[11px] font-mono text-slate-500 dark:text-slate-400 block">
+                            {canViewPrices
+                              ? `${formatMoney(item.unitPrice, store.currency)} × ${item.quantity}`
+                              : `Qty: ${item.quantity}`}
+                          </span>
+                          {item.note && (
+                            <span className="text-[11px] font-medium text-amber-800 dark:text-amber-300 block truncate">
+                              Note: {item.note}
+                            </span>
+                          )}
                         </div>
-                      ) : (
-                        <span className="font-mono font-bold text-slate-700 dark:text-slate-300 shrink-0">
-                          ×{item.quantity}
-                        </span>
-                      )}
-                    </div>
-                  ))}
+                        {canEditOrders ? (
+                          <div className="flex items-center gap-1 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => startEditingExisting(lineKey, 0, false, true)}
+                              className="w-7 h-7 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 flex items-center justify-center text-slate-600 dark:text-slate-300 cursor-pointer"
+                              aria-label={`Edit note for ${item.name}`}
+                              title="Kitchen Note"
+                            >
+                              <StickyNote className="w-3 h-3" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => startEditingExisting(lineKey, -1)}
+                              className="w-7 h-7 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 flex items-center justify-center text-slate-700 dark:text-slate-200 cursor-pointer"
+                              aria-label={`Reduce ${item.name}`}
+                            >
+                              <Minus className="w-3 h-3" />
+                            </button>
+                            <span className="w-6 text-center font-mono font-bold text-slate-900 dark:text-slate-100">
+                              {item.quantity}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => startEditingExisting(lineKey, 1)}
+                              className="w-7 h-7 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 flex items-center justify-center text-slate-700 dark:text-slate-200 cursor-pointer"
+                              aria-label={`Increase ${item.name}`}
+                            >
+                              <Plus className="w-3 h-3" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => startEditingExisting(lineKey, 0, true)}
+                              className="w-7 h-7 rounded-md flex items-center justify-center text-slate-400 hover:text-red-600 cursor-pointer"
+                              aria-label={`Remove ${item.name}`}
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        ) : (
+                          <span className="font-mono font-bold text-slate-700 dark:text-slate-300 shrink-0">
+                            ×{item.quantity}
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
                 <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
                   <p className="text-[11px] text-amber-800/80 dark:text-amber-300/80">
@@ -1419,6 +1996,87 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
                       <span>Collect Payment &amp; Clear Table</span>
                     </button>
                   )}
+                </div>
+              </div>
+            )}
+
+            {/* New Cart / Add-On Items Review (with Size & Kitchen Note controls) */}
+            {!editingOrder && cart.length > 0 && (
+              <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/50 p-3 space-y-2">
+                <div className="flex items-center justify-between text-xs font-semibold text-slate-900 dark:text-slate-100">
+                  <span>
+                    {activeTableSession ? `New Add-Ons (${cartCount})` : `New Order Items (${cartCount})`}
+                  </span>
+                  {canViewPrices && (
+                    <span className="font-mono tabular-nums brand-text">
+                      {formatMoney(cartTotal, store.currency)}
+                    </span>
+                  )}
+                </div>
+                <div className="divide-y divide-slate-200/70 dark:divide-slate-800">
+                  {cart.map((c) => {
+                    const displayName = formatDishNameWithVariant(c.product.name, c.variant?.name);
+                    const unitPrice = c.variant ? c.variant.price : c.product.sellingPrice;
+                    return (
+                      <div
+                        key={c.lineKey}
+                        className="py-1.5 flex items-center justify-between gap-2 text-xs"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="font-medium text-slate-900 dark:text-slate-100 truncate">
+                            {displayName}
+                          </div>
+                          {canViewPrices && (
+                            <div className="text-[11px] font-mono text-slate-500 dark:text-slate-400">
+                              {formatMoney(unitPrice, store.currency)} × {c.quantity}
+                            </div>
+                          )}
+                          {c.note && (
+                            <div className="text-[11px] font-medium text-amber-700 dark:text-amber-300 truncate">
+                              Note: {c.note}
+                            </div>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setNoteTarget({
+                                mode: 'cart',
+                                lineKey: c.lineKey,
+                                title: displayName,
+                              });
+                              setNoteDraft(c.note || '');
+                            }}
+                            className="mt-0.5 inline-flex items-center gap-1 text-[11px] font-medium brand-text hover:underline cursor-pointer"
+                          >
+                            <StickyNote className="w-3 h-3" />
+                            <span>{c.note ? 'Edit Note' : '+ Kitchen Note'}</span>
+                          </button>
+                        </div>
+
+                        <div className="flex items-center gap-1 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => updateCartLineQty(c.lineKey, -1)}
+                            className="w-7 h-7 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 flex items-center justify-center text-slate-700 dark:text-slate-200 cursor-pointer"
+                            aria-label={`Decrease ${displayName}`}
+                          >
+                            <Minus className="w-3 h-3" />
+                          </button>
+                          <span className="w-6 text-center font-mono font-bold text-slate-900 dark:text-slate-100">
+                            {c.quantity}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => updateCartLineQty(c.lineKey, 1)}
+                            className="w-7 h-7 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 flex items-center justify-center text-slate-700 dark:text-slate-200 cursor-pointer"
+                            aria-label={`Increase ${displayName}`}
+                          >
+                            <Plus className="w-3 h-3" />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
             )}
@@ -1448,53 +2106,58 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
                   </p>
                 ) : (
                   <div className="divide-y divide-amber-200/60 dark:divide-amber-900/40">
-                    {editItems.map((item) => (
-                      <div
-                        key={item.productId}
-                        className="py-1.5 flex items-center justify-between gap-2 text-xs"
-                      >
-                        <span className="font-medium text-slate-900 dark:text-slate-100 truncate">
-                          {item.name}
-                        </span>
-                        <div className="flex items-center gap-1 shrink-0">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const prod = products.find((p) => p.id === item.productId);
-                              if (prod) handleTapDish(prod, -1);
-                              else
-                                setEditItems((prev) =>
-                                  prev
-                                    .map((i) =>
-                                      i.productId === item.productId
-                                        ? {
-                                            ...i,
-                                            quantity: i.quantity - 1,
-                                            lineTotal: Number((i.unitPrice * (i.quantity - 1)).toFixed(2)),
-                                          }
-                                        : i
-                                    )
-                                    .filter((i) => i.quantity > 0)
-                                );
-                            }}
-                            className="w-7 h-7 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 flex items-center justify-center cursor-pointer"
-                          >
-                            <Minus className="w-3 h-3" />
-                          </button>
-                          <span className="w-6 text-center font-mono font-bold">{item.quantity}</span>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const prod = products.find((p) => p.id === item.productId);
-                              if (prod) handleTapDish(prod, 1);
-                            }}
-                            className="w-7 h-7 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 flex items-center justify-center cursor-pointer"
-                          >
-                            <Plus className="w-3 h-3" />
-                          </button>
+                    {editItems.map((item) => {
+                      const lineKey = getLineItemKey(item);
+                      return (
+                        <div
+                          key={lineKey}
+                          className="py-1.5 flex items-center justify-between gap-2 text-xs"
+                        >
+                          <div className="min-w-0 flex-1">
+                            <span className="font-medium text-slate-900 dark:text-slate-100 truncate block">
+                              {item.name}
+                            </span>
+                            {item.note && (
+                              <span className="text-[11px] font-medium text-amber-800 dark:text-amber-300 truncate block">
+                                Note: {item.note}
+                              </span>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setNoteTarget({
+                                  mode: 'edit',
+                                  lineKey,
+                                  title: item.name,
+                                });
+                                setNoteDraft(item.note || '');
+                              }}
+                              className="mt-0.5 inline-flex items-center gap-1 text-[11px] font-medium brand-text hover:underline cursor-pointer"
+                            >
+                              <StickyNote className="w-3 h-3" />
+                              <span>{item.note ? 'Edit Note' : '+ Kitchen Note'}</span>
+                            </button>
+                          </div>
+                          <div className="flex items-center gap-1 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => updateEditLineQty(lineKey, -1)}
+                              className="w-7 h-7 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 flex items-center justify-center cursor-pointer"
+                            >
+                              <Minus className="w-3 h-3" />
+                            </button>
+                            <span className="w-6 text-center font-mono font-bold">{item.quantity}</span>
+                            <button
+                              type="button"
+                              onClick={() => updateEditLineQty(lineKey, 1)}
+                              className="w-7 h-7 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 flex items-center justify-center cursor-pointer"
+                            >
+                              <Plus className="w-3 h-3" />
+                            </button>
+                          </div>
                         </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
 
@@ -1502,7 +2165,7 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
                   <div className="pt-1.5 border-t border-amber-300/60 dark:border-amber-800/60 text-[11px] font-mono space-y-0.5">
                     {editDiff.map((d) => (
                       <div
-                        key={d.productId}
+                        key={d.lineKey}
                         className={
                           d.delta > 0
                             ? 'text-emerald-700 dark:text-emerald-400'
@@ -1562,6 +2225,11 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
               {filteredProducts.map((product) => {
                 const qty = cartQtyMap.get(product.id) ?? 0;
+                const hasVariants =
+                  Array.isArray(product.variants) && product.variants.length > 0;
+                const minPrice = hasVariants
+                  ? Math.min(...product.variants!.map((v) => v.price))
+                  : product.sellingPrice;
                 const tracked = isProductStockTracked(product);
                 const outOfStock = tracked && product.stock <= 0 && !editingOrder;
                 return (
@@ -1576,6 +2244,7 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
                     <div className="min-w-0 flex-1">
                       <div className="text-xs text-slate-500 dark:text-slate-400 truncate">
                         {product.category}
+                        {hasVariants ? ` · ${product.variants!.length} sizes` : ''}
                       </div>
                       <div className="text-sm font-semibold text-slate-900 dark:text-slate-100 truncate">
                         {product.name}
@@ -1583,7 +2252,9 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
                       <div className="mt-0.5 flex items-center gap-2">
                         {canViewPrices && (
                           <span className="text-sm font-bold font-mono tabular-nums brand-text">
-                            {formatMoney(product.sellingPrice, store.currency)}
+                            {hasVariants
+                              ? `From ${formatMoney(minPrice, store.currency)}`
+                              : formatMoney(product.sellingPrice, store.currency)}
                           </span>
                         )}
                         <span
@@ -1602,7 +2273,17 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
                       </div>
                     </div>
 
-                    {qty > 0 ? (
+                    {hasVariants ? (
+                      <button
+                        type="button"
+                        disabled={outOfStock}
+                        onClick={() => handleTapDish(product, 1)}
+                        className="inline-flex items-center gap-1 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 hover:brand-bg hover:text-white px-3 py-2 text-xs font-semibold text-slate-800 dark:text-slate-100 disabled:opacity-40 transition-colors shrink-0 cursor-pointer"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        <span>{qty > 0 ? `Size (×${qty})` : 'Size'}</span>
+                      </button>
+                    ) : qty > 0 ? (
                       <div className="flex items-center gap-1.5 shrink-0">
                         <button
                           type="button"
@@ -1912,6 +2593,404 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
                   {settlingBill
                     ? 'Completing Bill...'
                     : `Confirm Paid · ${formatMoney(billCalculations.total, store.currency)}`}
+                </span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Dish Size / Variant & Kitchen Note Picker Modal */}
+      {pickerProduct && (
+        <div
+          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-slate-950/65 p-0 sm:p-4"
+          role="dialog"
+          aria-modal="true"
+        >
+          <div className="w-full sm:max-w-md rounded-t-2xl sm:rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <h3 className="text-base font-bold font-display text-slate-900 dark:text-slate-100 truncate">
+                  {pickerProduct.name}
+                </h3>
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  Choose size &amp; optional kitchen instructions
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPickerProduct(null)}
+                className="rounded-lg p-1.5 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                aria-label="Close size picker"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {pickerProduct.variants && pickerProduct.variants.length > 0 && (
+              <div className="space-y-1.5">
+                <div className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                  Size / Portion *
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  {pickerProduct.variants.map((v) => {
+                    const selected = pickerVariantId === v.id;
+                    return (
+                      <button
+                        key={v.id}
+                        type="button"
+                        onClick={() => setPickerVariantId(v.id)}
+                        className={`rounded-xl border px-3 py-2.5 text-left transition-colors cursor-pointer ${
+                          selected
+                            ? 'brand-border brand-soft-bg'
+                            : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950'
+                        }`}
+                      >
+                        <div className="text-xs font-semibold text-slate-900 dark:text-slate-100 truncate">
+                          {v.name}
+                        </div>
+                        {canViewPrices && (
+                          <div className="text-xs font-bold font-mono tabular-nums brand-text mt-0.5">
+                            {formatMoney(v.price, store.currency)}
+                          </div>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                  Kitchen Note (Optional)
+                </label>
+                {pickerNote && (
+                  <button
+                    type="button"
+                    onClick={() => setPickerNote('')}
+                    className="text-[11px] text-slate-500 hover:text-red-600 cursor-pointer"
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {KITCHEN_QUICK_NOTES.map((chip) => {
+                  const active = pickerNote.toLowerCase().includes(chip.toLowerCase());
+                  return (
+                    <button
+                      key={chip}
+                      type="button"
+                      onClick={() => {
+                        if (active) return;
+                        const next = pickerNote.trim() ? `${pickerNote.trim()}, ${chip}` : chip;
+                        setPickerNote(next.slice(0, BLUEPRINT_LIMITS.KITCHEN_NOTE_MAX));
+                      }}
+                      className={`rounded-md border px-2 py-1 text-[11px] font-medium cursor-pointer ${
+                        active
+                          ? 'brand-border brand-soft-bg brand-text'
+                          : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-300'
+                      }`}
+                    >
+                      + {chip}
+                    </button>
+                  );
+                })}
+              </div>
+              <input
+                type="text"
+                maxLength={BLUEPRINT_LIMITS.KITCHEN_NOTE_MAX}
+                value={pickerNote}
+                onChange={(e) => setPickerNote(e.target.value)}
+                placeholder="e.g. Less spicy, extra garlic sauce..."
+                className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-xs text-slate-900 dark:text-slate-100"
+              />
+            </div>
+
+            <div className="flex items-center justify-between gap-3 pt-1">
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setPickerQty((q) => Math.max(1, q - 1))}
+                  className="w-9 h-9 rounded-lg border border-slate-200 dark:border-slate-700 flex items-center justify-center text-slate-700 dark:text-slate-200 cursor-pointer"
+                >
+                  <Minus className="w-4 h-4" />
+                </button>
+                <span className="w-7 text-center text-sm font-mono font-bold text-slate-900 dark:text-slate-100">
+                  {pickerQty}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setPickerQty((q) => q + 1)}
+                  className="w-9 h-9 rounded-lg border border-slate-200 dark:border-slate-700 flex items-center justify-center text-slate-700 dark:text-slate-200 cursor-pointer"
+                >
+                  <Plus className="w-4 h-4" />
+                </button>
+              </div>
+
+              <button
+                type="button"
+                onClick={handleConfirmVariantPicker}
+                className="flex-1 inline-flex items-center justify-center gap-2 rounded-xl brand-bg px-4 py-2.5 text-sm font-semibold text-white cursor-pointer"
+              >
+                <Plus className="w-4 h-4" />
+                <span>
+                  {canViewPrices
+                    ? `Add ${formatMoney(
+                        (pickerProduct.variants?.find((v) => v.id === pickerVariantId)?.price ??
+                          pickerProduct.sellingPrice) * pickerQty,
+                        store.currency
+                      )}`
+                    : `Add ×${pickerQty}`}
+                </span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Kitchen Note Editor Modal */}
+      {noteTarget && (
+        <div
+          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-slate-950/65 p-0 sm:p-4"
+          role="dialog"
+          aria-modal="true"
+        >
+          <div className="w-full sm:max-w-md rounded-t-2xl sm:rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 shadow-2xl space-y-4">
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <h3 className="text-base font-bold font-display text-slate-900 dark:text-slate-100 truncate">
+                  Kitchen Note — {noteTarget.title}
+                </h3>
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  Sent directly to Kitchen KOT printer
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setNoteTarget(null)}
+                className="rounded-lg p-1.5 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                aria-label="Close note editor"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="flex flex-wrap gap-1.5">
+              {KITCHEN_QUICK_NOTES.map((chip) => {
+                const active = noteDraft.toLowerCase().includes(chip.toLowerCase());
+                return (
+                  <button
+                    key={chip}
+                    type="button"
+                    onClick={() => {
+                      if (active) return;
+                      const next = noteDraft.trim() ? `${noteDraft.trim()}, ${chip}` : chip;
+                      setNoteDraft(next.slice(0, BLUEPRINT_LIMITS.KITCHEN_NOTE_MAX));
+                    }}
+                    className={`rounded-md border px-2.5 py-1 text-[11px] font-medium cursor-pointer ${
+                      active
+                        ? 'brand-border brand-soft-bg brand-text'
+                        : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-300'
+                    }`}
+                  >
+                    + {chip}
+                  </button>
+                );
+              })}
+            </div>
+
+            <input
+              type="text"
+              maxLength={BLUEPRINT_LIMITS.KITCHEN_NOTE_MAX}
+              value={noteDraft}
+              onChange={(e) => setNoteDraft(e.target.value)}
+              placeholder="Write custom cooking instruction..."
+              className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2.5 text-xs text-slate-900 dark:text-slate-100"
+            />
+
+            <div className="flex items-center justify-end gap-2">
+              {noteDraft && (
+                <button
+                  type="button"
+                  onClick={() => setNoteDraft('')}
+                  className="mr-auto text-xs font-medium text-red-600 hover:underline cursor-pointer"
+                >
+                  Clear Note
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setNoteTarget(null)}
+                className="rounded-lg border border-slate-200 dark:border-slate-700 px-3.5 py-2 text-xs font-semibold text-slate-700 dark:text-slate-300 cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleSaveKitchenNote}
+                className="rounded-lg brand-bg px-4 py-2 text-xs font-semibold text-white cursor-pointer"
+              >
+                Save Note
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Table Transfer (Shift) & Table Merge Modal */}
+      {transferModalOpen && activeTableSession && (
+        <div
+          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-slate-950/65 p-0 sm:p-4"
+          role="dialog"
+          aria-modal="true"
+        >
+          <div className="w-full sm:max-w-lg rounded-t-2xl sm:rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <h3 className="text-base font-bold font-display text-slate-900 dark:text-slate-100">
+                  Shift or Merge Table {activeTableSession.tableNumber}
+                </h3>
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  Move to an Empty table, or pick an Occupied table to combine bills
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setTransferModalOpen(false)}
+                className="rounded-lg p-1.5 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                aria-label="Close transfer modal"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 px-3.5 py-2.5 flex items-center justify-between text-xs">
+              <span className="font-semibold text-slate-800 dark:text-slate-200">
+                From Table {activeTableSession.tableNumber} ({activeTableSession.itemCount} items)
+              </span>
+              {canViewPrices && (
+                <span className="font-mono font-bold brand-text tabular-nums">
+                  {formatMoney(activeTableSession.subtotal, store.currency)}
+                </span>
+              )}
+            </div>
+
+            <div className="space-y-2">
+              <div className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                Select Target Table *
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 max-h-60 overflow-y-auto pr-1">
+                {tableNumbersList
+                  .filter((num) => num !== activeTableSession.tableNumber)
+                  .map((num) => {
+                    const occ = tableSessionMap.get(num);
+                    const selected = transferTargetTable === num;
+                    return (
+                      <button
+                        key={num}
+                        type="button"
+                        onClick={() => {
+                          setTransferTargetTable(num);
+                          setTransferError(null);
+                        }}
+                        className={`rounded-xl border p-2.5 text-left transition-colors cursor-pointer ${
+                          selected
+                            ? 'brand-border brand-soft-bg ring-1 ring-inset ring-current/20'
+                            : occ
+                            ? 'border-amber-300 dark:border-amber-800 bg-amber-50/50 dark:bg-amber-950/20 hover:border-amber-500'
+                            : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 hover:border-slate-400'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-1">
+                          <span className="text-xs font-bold text-slate-900 dark:text-slate-100">
+                            Table {num}
+                          </span>
+                          <span
+                            className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${
+                              occ
+                                ? 'bg-amber-100 dark:bg-amber-900/60 text-amber-800 dark:text-amber-300'
+                                : 'bg-emerald-100 dark:bg-emerald-900/50 text-emerald-700 dark:text-emerald-300'
+                            }`}
+                          >
+                            {occ ? 'Merge' : 'Empty'}
+                          </span>
+                        </div>
+                        <div className="text-[11px] font-mono text-slate-500 dark:text-slate-400 mt-1 truncate">
+                          {occ
+                            ? `${occ.itemCount} items${
+                                canViewPrices ? ` · ${formatMoney(occ.subtotal, store.currency)}` : ''
+                              }`
+                            : 'Shift here'}
+                        </div>
+                      </button>
+                    );
+                  })}
+              </div>
+            </div>
+
+            {transferTargetTable && (
+              <div
+                className={`rounded-lg border px-3 py-2 text-xs ${
+                  tableSessionMap.has(transferTargetTable)
+                    ? 'border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/30 text-amber-900 dark:text-amber-200'
+                    : 'border-emerald-200 dark:border-emerald-900/60 bg-emerald-50 dark:bg-emerald-950/30 text-emerald-900 dark:text-emerald-200'
+                }`}
+              >
+                {tableSessionMap.has(transferTargetTable) ? (
+                  <span>
+                    <strong>Merge Preview:</strong> Items from Table {activeTableSession.tableNumber}{' '}
+                    will combine into <strong>Table {transferTargetTable}</strong>, and Table{' '}
+                    {activeTableSession.tableNumber} will become Empty.
+                  </span>
+                ) : (
+                  <span>
+                    <strong>Shift Preview:</strong> Table {activeTableSession.tableNumber} will move
+                    to <strong>Table {transferTargetTable}</strong>, and Table{' '}
+                    {activeTableSession.tableNumber} will become Empty.
+                  </span>
+                )}
+              </div>
+            )}
+
+            <label className="flex items-center gap-2 text-xs text-slate-700 dark:text-slate-300 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={transferNotifyKot}
+                onChange={(e) => setTransferNotifyKot(e.target.checked)}
+                className="rounded border-slate-300 dark:border-slate-700"
+              />
+              <span>Send Shift / Merge Notice KOT to Kitchen (optional)</span>
+            </label>
+
+            {transferError && (
+              <div className="rounded-lg border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/40 px-3 py-2 text-xs text-red-700 dark:text-red-300">
+                {transferError}
+              </div>
+            )}
+
+            <div className="flex items-center justify-end gap-2 pt-1">
+              <button
+                type="button"
+                disabled={submitting}
+                onClick={() => setTransferModalOpen(false)}
+                className="rounded-xl border border-slate-200 dark:border-slate-700 px-4 py-2.5 text-xs font-semibold text-slate-700 dark:text-slate-300 cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={submitting || !transferTargetTable}
+                onClick={() => void handleConfirmTableTransferOrMerge()}
+                className="flex-1 inline-flex items-center justify-center gap-2 rounded-xl brand-bg px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50 cursor-pointer"
+              >
+                <ArrowRightLeft className="w-4 h-4" />
+                <span>
+                  {submitting
+                    ? 'Updating...'
+                    : tableSessionMap.has(transferTargetTable)
+                    ? `Merge into Table ${transferTargetTable}`
+                    : `Shift to Table ${transferTargetTable}`}
                 </span>
               </button>
             </div>

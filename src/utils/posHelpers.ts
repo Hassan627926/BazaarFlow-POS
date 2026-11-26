@@ -259,6 +259,33 @@ export function exportSalesLedgerCSV(store: StoreConfig, sales: Sale[]): void {
   triggerCsvDownload(`${slug}-sales-ledger-${getTodayDateKey()}.csv`, rows);
 }
 
+export const KITCHEN_QUICK_NOTES = [
+  'Less Spicy',
+  'Extra Spicy',
+  'No Onion',
+  'No Garlic',
+  'No Ice',
+  'Extra Cheese',
+  'Well Done',
+  'Separate Gravy',
+] as const;
+
+export function getLineItemKey(item: {
+  productId: string;
+  variantId?: string;
+  variantName?: string;
+  note?: string;
+}): string {
+  const variantKey = (item.variantId || item.variantName || '').trim().toLowerCase();
+  const noteKey = (item.note || '').trim().toLowerCase();
+  return `${item.productId}::${variantKey}::${noteKey}`;
+}
+
+export function formatDishNameWithVariant(baseName: string, variantName?: string): string {
+  const cleanVariant = (variantName || '').trim();
+  return cleanVariant ? `${baseName} (${cleanVariant})` : baseName;
+}
+
 export function isProductStockTracked(product: Pick<Product, 'trackStock'>): boolean {
   return product.trackStock !== false;
 }

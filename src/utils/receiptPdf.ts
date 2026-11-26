@@ -213,6 +213,19 @@ function renderReceiptIntoDoc(
     }
     y += wrappedName.length * (lineH - 0.5);
 
+    if (item.note) {
+      doc.setFont('helvetica', 'italic');
+      doc.setFontSize(smallFont - 0.6);
+      const noteLines = doc.splitTextToSize(`Note: ${item.note}`, itemColW) as string[];
+      if (!dryRun) {
+        doc.setTextColor(71, 85, 105);
+        noteLines.forEach((line, idx) => {
+          doc.text(line, margin, y + idx * (lineH - 0.6));
+        });
+      }
+      y += noteLines.length * (lineH - 0.6);
+    }
+
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(smallFont - 0.8);
     if (!dryRun) {

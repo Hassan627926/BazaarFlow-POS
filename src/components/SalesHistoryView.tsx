@@ -415,6 +415,11 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
                 <div key={`${item.productId}-${idx}`} className="py-2.5 flex justify-between gap-2">
                   <div>
                     <div className="font-medium text-slate-900 dark:text-slate-100">{item.name}</div>
+                    {item.note && (
+                      <div className="text-[11px] italic text-amber-700 dark:text-amber-300">
+                        Note: {item.note}
+                      </div>
+                    )}
                     <div className="text-slate-500 dark:text-slate-400 font-mono">
                       {item.quantity} × {formatMoney(item.unitPrice, store.currency)}
                     </div>

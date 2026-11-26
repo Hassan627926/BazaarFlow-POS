@@ -101,6 +101,7 @@
         "minStock": { "type": "number" },
         "unit": { "type": "string", "minLength": 1, "maxLength": 20 },
         "trackStock": { "type": "boolean", "description": "Whether stock quantity is tracked and deducted on sale (false for made-to-order restaurant dishes)." },
+        "variants": { "type": "array", "description": "Optional dish sizes/variants (e.g. Half, Full, S/M/L) with custom prices." },
         "active": { "type": "boolean" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }

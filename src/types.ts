@@ -43,6 +43,9 @@ export const BLUEPRINT_LIMITS = {
   EMPLOYEE_NOTES_MAX: 160,
   EMPLOYEE_EMAIL_MAX: 120,
   STOCK_NOTE_MAX: 160,
+  VARIANT_NAME_MAX: 30,
+  KITCHEN_NOTE_MAX: 100,
+  VARIANTS_MAX: 12,
   SALE_ITEMS_MAX: 100,
   HEX_COLOR_REGEX: /^#[0-9a-fA-F]{6}$/,
   ID_REGEX: /^[a-zA-Z0-9_\-]+$/,
@@ -66,6 +69,13 @@ export interface StoreConfig {
   updatedAt?: Timestamp | null;
 }
 
+export interface ProductVariant {
+  id: string;
+  name: string;
+  price: number;
+  costPrice?: number;
+}
+
 export interface Product {
   id: string;
   ownerId: string;
@@ -80,6 +90,7 @@ export interface Product {
   minStock: number;
   unit: string;
   trackStock?: boolean;
+  variants?: ProductVariant[];
   active: boolean;
   createdAt?: Timestamp | null;
   updatedAt?: Timestamp | null;
@@ -88,6 +99,9 @@ export interface Product {
 export interface SaleItem {
   productId: string;
   name: string;
+  variantId?: string;
+  variantName?: string;
+  note?: string;
   quantity: number;
   unitPrice: number;
   costPrice: number;
@@ -236,7 +250,10 @@ export interface KotTicket {
 }
 
 export interface CartItem {
+  lineKey: string;
   product: Product;
+  variant?: ProductVariant;
+  note?: string;
   quantity: number;
 }
 

@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ArrowRightLeft,
   Banknote,
   Barcode,
   Check,
@@ -14,6 +15,7 @@ import {
   Receipt,
   Search,
   ShoppingBag,
+  StickyNote,
   Trash2,
   User,
   UserCheck,
@@ -31,17 +33,21 @@ import {
   type PaymentMethod,
   type PrintJob,
   type Product,
+  type ProductVariant,
   type Sale,
   type SaleItem,
   type StoreConfig,
   type TableSession,
 } from '../types';
 import {
+  formatDishNameWithVariant,
   formatMoney,
   generateInvoiceNumber,
   generateSafeId,
+  getLineItemKey,
   getTodayDateKey,
   isProductStockTracked,
+  KITCHEN_QUICK_NOTES,
 } from '../utils/posHelpers';
 
 interface BillingViewProps {
@@ -60,22 +66,63 @@ function normalizePhoneDigits(raw: string): string {
   return raw.replace(/\D/g, '').slice(0, 24);
 }
 
+function buildCleanSaleItem(params: {
+  productId: string;
+  name: string;
+  variantId?: string;
+  variantName?: string;
+  note?: string;
+  quantity: number;
+  unitPrice: number;
+  costPrice: number;
+  sku: string;
+  barcode: string;
+}): SaleItem {
+  const item: SaleItem = {
+    productId: params.productId,
+    name: params.name,
+    quantity: params.quantity,
+    unitPrice: params.unitPrice,
+    costPrice: params.costPrice,
+    lineTotal: Number((params.unitPrice * params.quantity).toFixed(2)),
+    sku: params.sku,
+    barcode: params.barcode,
+  };
+  if (params.variantId) item.variantId = params.variantId;
+  if (params.variantName) item.variantName = params.variantName;
+  const cleanNote = (params.note || '').trim().slice(0, BLUEPRINT_LIMITS.KITCHEN_NOTE_MAX);
+  if (cleanNote) item.note = cleanNote;
+  return item;
+}
+
 function mergeSaleItems(existing: SaleItem[], additions: SaleItem[]): SaleItem[] {
   const map = new Map<string, SaleItem>();
   for (const item of existing) {
-    map.set(item.productId, { ...item });
-  }
-  for (const add of additions) {
-    const prev = map.get(add.productId);
+    const key = getLineItemKey(item);
+    const prev = map.get(key);
     if (prev) {
-      const nextQty = prev.quantity + add.quantity;
-      map.set(add.productId, {
+      const nextQty = prev.quantity + item.quantity;
+      map.set(key, {
         ...prev,
         quantity: nextQty,
         lineTotal: Number((prev.unitPrice * nextQty).toFixed(2)),
       });
     } else {
-      map.set(add.productId, { ...add });
+      map.set(key, { ...item });
+    }
+  }
+  for (const add of additions) {
+    const key = getLineItemKey(add);
+    const prev = map.get(key);
+    if (prev) {
+      const nextQty = prev.quantity + add.quantity;
+      map.set(key, {
+        ...prev,
+        quantity: nextQty,
+        lineTotal: Number((prev.unitPrice * nextQty).toFixed(2)),
+      });
+    } else {
+      map.set(key, { ...add });
     }
   }
   return Array.from(map.values());
@@ -120,6 +167,24 @@ export const BillingView: React.FC<BillingViewProps> = ({
 
   const [editingTableOrder, setEditingTableOrder] = useState<boolean>(false);
   const [editTableItems, setEditTableItems] = useState<SaleItem[]>([]);
+
+  // Size/Variant & Kitchen Note modals (Restaurant mode)
+  const [pickerProduct, setPickerProduct] = useState<Product | null>(null);
+  const [pickerVariantId, setPickerVariantId] = useState<string>('');
+  const [pickerNote, setPickerNote] = useState<string>('');
+  const [pickerQty, setPickerQty] = useState<number>(1);
+  const [noteTarget, setNoteTarget] = useState<{
+    mode: 'cart' | 'edit_table';
+    lineKey: string;
+    title: string;
+  } | null>(null);
+  const [noteDraft, setNoteDraft] = useState<string>('');
+
+  // Table Transfer / Merge modal state
+  const [transferModalOpen, setTransferModalOpen] = useState<boolean>(false);
+  const [transferTargetTable, setTransferTargetTable] = useState<string>('');
+  const [transferNotifyKot, setTransferNotifyKot] = useState<boolean>(false);
+  const [transferError, setTransferError] = useState<string | null>(null);
 
   const [processing, setProcessing] = useState(false);
   const [checkoutError, setCheckoutError] = useState<string | null>(null);
@@ -254,16 +319,22 @@ export const BillingView: React.FC<BillingViewProps> = ({
     }
   };
 
-  const updateEditTableItemQty = (productId: string, delta: number) => {
+  const updateEditTableItemQty = (lineKey: string, delta: number) => {
     if (!activeTableSession) return;
     setCheckoutError(null);
 
+    const targetItem = editTableItems.find((i) => getLineItemKey(i) === lineKey);
+    if (!targetItem) return;
+
     if (delta > 0) {
-      const product = products.find((p) => p.id === productId);
-      const originalQty =
-        activeTableSession.items.find((i) => i.productId === productId)?.quantity ?? 0;
-      const currentDraftQty = editTableItems.find((i) => i.productId === productId)?.quantity ?? 0;
-      const netExtraNeeded = currentDraftQty + delta - originalQty;
+      const product = products.find((p) => p.id === targetItem.productId);
+      const originalTotalQty = activeTableSession.items
+        .filter((i) => i.productId === targetItem.productId)
+        .reduce((acc, i) => acc + i.quantity, 0);
+      const currentDraftTotalQty = editTableItems
+        .filter((i) => i.productId === targetItem.productId)
+        .reduce((acc, i) => acc + i.quantity, 0);
+      const netExtraNeeded = currentDraftTotalQty + delta - originalTotalQty;
       if (product && isProductStockTracked(product) && netExtraNeeded > product.stock) {
         setCheckoutError(
           `Only ${product.stock} extra ${product.unit} available in stock for ${product.name}.`
@@ -275,7 +346,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
     setEditTableItems((prev) =>
       prev
         .map((item) => {
-          if (item.productId !== productId) return item;
+          if (getLineItemKey(item) !== lineKey) return item;
           const nextQty = item.quantity + delta;
           return {
             ...item,
@@ -287,12 +358,17 @@ export const BillingView: React.FC<BillingViewProps> = ({
     );
   };
 
-  const removeEditTableItem = (productId: string) => {
+  const removeEditTableItem = (lineKey: string) => {
     setCheckoutError(null);
-    setEditTableItems((prev) => prev.filter((item) => item.productId !== productId));
+    setEditTableItems((prev) => prev.filter((item) => getLineItemKey(item) !== lineKey));
   };
 
-  const startEditingAndAdjustItem = (productId: string, delta: number, removeAll = false) => {
+  const startEditingAndAdjustItem = (
+    lineKey: string,
+    delta: number,
+    removeAll = false,
+    openNoteAfter = false
+  ) => {
     if (!activeTableSession) return;
     setCheckoutError(null);
 
@@ -301,12 +377,17 @@ export const BillingView: React.FC<BillingViewProps> = ({
         ? mergeSaleItems(activeTableSession.items, cartSaleItems)
         : activeTableSession.items.map((item) => ({ ...item }));
 
-    if (delta > 0 && !removeAll) {
-      const product = products.find((p) => p.id === productId);
-      const originalQty =
-        activeTableSession.items.find((i) => i.productId === productId)?.quantity ?? 0;
-      const currentDraftQty = baseDraft.find((i) => i.productId === productId)?.quantity ?? 0;
-      const netExtraNeeded = currentDraftQty + delta - originalQty;
+    const targetItem = baseDraft.find((i) => getLineItemKey(i) === lineKey);
+
+    if (delta > 0 && !removeAll && targetItem) {
+      const product = products.find((p) => p.id === targetItem.productId);
+      const originalTotalQty = activeTableSession.items
+        .filter((i) => i.productId === targetItem.productId)
+        .reduce((acc, i) => acc + i.quantity, 0);
+      const currentDraftTotalQty = baseDraft
+        .filter((i) => i.productId === targetItem.productId)
+        .reduce((acc, i) => acc + i.quantity, 0);
+      const netExtraNeeded = currentDraftTotalQty + delta - originalTotalQty;
       if (product && isProductStockTracked(product) && netExtraNeeded > product.stock) {
         setCheckoutError(
           `Only ${product.stock} extra ${product.unit} available in stock for ${product.name}.`
@@ -316,10 +397,12 @@ export const BillingView: React.FC<BillingViewProps> = ({
     }
 
     const nextDraft = removeAll
-      ? baseDraft.filter((item) => item.productId !== productId)
+      ? baseDraft.filter((item) => getLineItemKey(item) !== lineKey)
+      : delta === 0
+      ? baseDraft
       : baseDraft
           .map((item) => {
-            if (item.productId !== productId) return item;
+            if (getLineItemKey(item) !== lineKey) return item;
             const nextQty = item.quantity + delta;
             return {
               ...item,
@@ -332,6 +415,15 @@ export const BillingView: React.FC<BillingViewProps> = ({
     setCart([]);
     setEditTableItems(nextDraft);
     setEditingTableOrder(true);
+
+    if (openNoteAfter && targetItem) {
+      setNoteTarget({
+        mode: 'edit_table',
+        lineKey,
+        title: targetItem.name,
+      });
+      setNoteDraft(targetItem.note || '');
+    }
   };
 
   const handlePhoneChange = (rawValue: string) => {
@@ -383,15 +475,36 @@ export const BillingView: React.FC<BillingViewProps> = ({
     }
   };
 
-  const addToCart = (product: Product) => {
-    // When editing an occupied table's order, tapping a menu item adds/swaps it directly into the edit draft
+  const addConfiguredItem = (
+    product: Product,
+    variant?: ProductVariant,
+    note?: string,
+    qtyToAdd = 1
+  ) => {
+    const cleanNote = (note || '').trim().slice(0, BLUEPRINT_LIMITS.KITCHEN_NOTE_MAX);
+    const unitPrice = variant ? variant.price : product.sellingPrice;
+    const costPrice =
+      variant?.costPrice && variant.costPrice > 0 ? variant.costPrice : product.costPrice;
+    const displayName = formatDishNameWithVariant(product.name, variant?.name);
+    const lineKey = getLineItemKey({
+      productId: product.id,
+      variantId: variant?.id,
+      variantName: variant?.name,
+      note: cleanNote,
+    });
+    const tracked = isProductStockTracked(product);
+
+    // When editing an occupied table's order, add directly into the edit draft
     if (editingTableOrder && activeTableSession) {
       setCheckoutError(null);
-      const originalQty =
-        activeTableSession.items.find((i) => i.productId === product.id)?.quantity ?? 0;
-      const currentDraftQty = editTableItems.find((i) => i.productId === product.id)?.quantity ?? 0;
-      const netExtraNeeded = currentDraftQty + 1 - originalQty;
-      const tracked = isProductStockTracked(product);
+      const originalTotalQty = activeTableSession.items
+        .filter((i) => i.productId === product.id)
+        .reduce((acc, i) => acc + i.quantity, 0);
+      const currentDraftTotalQty = editTableItems
+        .filter((i) => i.productId === product.id)
+        .reduce((acc, i) => acc + i.quantity, 0);
+      const netExtraNeeded = currentDraftTotalQty + qtyToAdd - originalTotalQty;
+
       if (tracked && netExtraNeeded > product.stock) {
         setCheckoutError(
           product.stock <= 0
@@ -400,75 +513,193 @@ export const BillingView: React.FC<BillingViewProps> = ({
         );
         return;
       }
+
       setEditTableItems((prev) => {
-        const existing = prev.find((i) => i.productId === product.id);
+        const existing = prev.find((i) => getLineItemKey(i) === lineKey);
         if (existing) {
-          const nextQty = existing.quantity + 1;
+          const nextQty = existing.quantity + qtyToAdd;
           return prev.map((i) =>
-            i.productId === product.id
+            getLineItemKey(i) === lineKey
               ? { ...i, quantity: nextQty, lineTotal: Number((i.unitPrice * nextQty).toFixed(2)) }
               : i
           );
         }
         return [
           ...prev,
-          {
+          buildCleanSaleItem({
             productId: product.id,
-            name: product.name,
-            quantity: 1,
-            unitPrice: product.sellingPrice,
-            costPrice: product.costPrice,
-            lineTotal: Number(product.sellingPrice.toFixed(2)),
+            name: displayName,
+            variantId: variant?.id,
+            variantName: variant?.name,
+            note: cleanNote,
+            quantity: qtyToAdd,
+            unitPrice,
+            costPrice,
             sku: product.sku,
             barcode: isRetail ? product.barcode : '',
-          },
+          }),
         ];
       });
       return;
     }
 
-    const tracked = isProductStockTracked(product);
     if (tracked && product.stock <= 0) {
       setCheckoutError(`${product.name} is out of stock.`);
       return;
     }
+
+    const currentCartTotalForProduct = cart
+      .filter((c) => c.product.id === product.id)
+      .reduce((acc, c) => acc + c.quantity, 0);
+    if (tracked && currentCartTotalForProduct + qtyToAdd > product.stock) {
+      setCheckoutError(`Only ${product.stock} ${product.unit} available for ${product.name}.`);
+      return;
+    }
+
     setCheckoutError(null);
     setCart((prev) => {
-      const existing = prev.find((c) => c.product.id === product.id);
+      const existing = prev.find((c) => c.lineKey === lineKey);
       if (existing) {
-        if (tracked && existing.quantity >= product.stock) {
-          setCheckoutError(`Only ${product.stock} ${product.unit} available for ${product.name}.`);
-          return prev;
-        }
         return prev.map((c) =>
-          c.product.id === product.id ? { ...c, quantity: c.quantity + 1 } : c
+          c.lineKey === lineKey ? { ...c, quantity: c.quantity + qtyToAdd } : c
         );
       }
-      return [...prev, { product, quantity: 1 }];
+      return [
+        ...prev,
+        {
+          lineKey,
+          product,
+          variant,
+          note: cleanNote || undefined,
+          quantity: qtyToAdd,
+        },
+      ];
     });
   };
 
-  const updateCartQty = (productId: string, delta: number) => {
+  const openVariantPicker = (product: Product) => {
+    const firstVar = product.variants && product.variants.length > 0 ? product.variants[0] : null;
+    setPickerProduct(product);
+    setPickerVariantId(firstVar ? firstVar.id : '');
+    setPickerNote('');
+    setPickerQty(1);
     setCheckoutError(null);
+  };
+
+  const handleConfirmVariantPicker = () => {
+    if (!pickerProduct) return;
+    const selectedVar =
+      pickerProduct.variants?.find((v) => v.id === pickerVariantId) ??
+      pickerProduct.variants?.[0];
+    addConfiguredItem(pickerProduct, selectedVar, pickerNote, pickerQty);
+    setPickerProduct(null);
+    setPickerVariantId('');
+    setPickerNote('');
+    setPickerQty(1);
+  };
+
+  const addToCart = (product: Product) => {
+    if (!isRetail && Array.isArray(product.variants) && product.variants.length > 0) {
+      openVariantPicker(product);
+      return;
+    }
+    addConfiguredItem(product, undefined, undefined, 1);
+  };
+
+  const updateCartQty = (lineKey: string, delta: number) => {
+    setCheckoutError(null);
+    const target = cart.find((c) => c.lineKey === lineKey);
+    if (!target) return;
+
+    if (delta > 0 && isProductStockTracked(target.product)) {
+      const totalForProduct = cart
+        .filter((c) => c.product.id === target.product.id)
+        .reduce((acc, c) => acc + c.quantity, 0);
+      if (totalForProduct + delta > target.product.stock) {
+        setCheckoutError(
+          `Stock limit reached (${target.product.stock} ${target.product.unit}) for ${target.product.name}.`
+        );
+        return;
+      }
+    }
+
     setCart((prev) =>
       prev
         .map((item) => {
-          if (item.product.id !== productId) return item;
-          const nextQty = item.quantity + delta;
-          if (isProductStockTracked(item.product) && nextQty > item.product.stock) {
-            setCheckoutError(
-              `Stock limit reached (${item.product.stock} ${item.product.unit}) for ${item.product.name}.`
-            );
-            return item;
-          }
-          return { ...item, quantity: nextQty };
+          if (item.lineKey !== lineKey) return item;
+          return { ...item, quantity: item.quantity + delta };
         })
         .filter((item) => item.quantity > 0)
     );
   };
 
-  const removeFromCart = (productId: string) => {
-    setCart((prev) => prev.filter((item) => item.product.id !== productId));
+  const removeFromCart = (lineKey: string) => {
+    setCart((prev) => prev.filter((item) => item.lineKey !== lineKey));
+  };
+
+  const handleSaveKitchenNote = () => {
+    if (!noteTarget) return;
+    const cleanNote = noteDraft.trim().slice(0, BLUEPRINT_LIMITS.KITCHEN_NOTE_MAX);
+
+    if (noteTarget.mode === 'cart') {
+      setCart((prev) => {
+        const target = prev.find((c) => c.lineKey === noteTarget.lineKey);
+        if (!target) return prev;
+        const nextLineKey = getLineItemKey({
+          productId: target.product.id,
+          variantId: target.variant?.id,
+          variantName: target.variant?.name,
+          note: cleanNote,
+        });
+        const withoutTarget = prev.filter((c) => c.lineKey !== noteTarget.lineKey);
+        const duplicate = withoutTarget.find((c) => c.lineKey === nextLineKey);
+        if (duplicate) {
+          return withoutTarget.map((c) =>
+            c.lineKey === nextLineKey ? { ...c, quantity: c.quantity + target.quantity } : c
+          );
+        }
+        return prev.map((c) =>
+          c.lineKey === noteTarget.lineKey
+            ? { ...c, lineKey: nextLineKey, note: cleanNote || undefined }
+            : c
+        );
+      });
+    } else {
+      setEditTableItems((prev) => {
+        const target = prev.find((i) => getLineItemKey(i) === noteTarget.lineKey);
+        if (!target) return prev;
+        const updatedItem = buildCleanSaleItem({
+          productId: target.productId,
+          name: target.name,
+          variantId: target.variantId,
+          variantName: target.variantName,
+          note: cleanNote,
+          quantity: target.quantity,
+          unitPrice: target.unitPrice,
+          costPrice: target.costPrice,
+          sku: target.sku,
+          barcode: target.barcode,
+        });
+        const nextKey = getLineItemKey(updatedItem);
+        const withoutTarget = prev.filter((i) => getLineItemKey(i) !== noteTarget.lineKey);
+        const duplicate = withoutTarget.find((i) => getLineItemKey(i) === nextKey);
+        if (duplicate) {
+          return withoutTarget.map((i) =>
+            getLineItemKey(i) === nextKey
+              ? {
+                  ...i,
+                  quantity: i.quantity + updatedItem.quantity,
+                  lineTotal: Number((i.unitPrice * (i.quantity + updatedItem.quantity)).toFixed(2)),
+                }
+              : i
+          );
+        }
+        return prev.map((i) => (getLineItemKey(i) === noteTarget.lineKey ? updatedItem : i));
+      });
+    }
+
+    setNoteTarget(null);
+    setNoteDraft('');
   };
 
   const clearCart = (keepTable = false) => {
@@ -515,29 +746,47 @@ export const BillingView: React.FC<BillingViewProps> = ({
 
   const cartSaleItems = useMemo<SaleItem[]>(
     () =>
-      cart.map((c) => ({
-        productId: c.product.id,
-        name: c.product.name,
-        quantity: c.quantity,
-        unitPrice: c.product.sellingPrice,
-        costPrice: c.product.costPrice,
-        lineTotal: Number((c.product.sellingPrice * c.quantity).toFixed(2)),
-        sku: c.product.sku,
-        barcode: isRetail ? c.product.barcode : '',
-      })),
+      cart.map((c) => {
+        const unitPrice = c.variant ? c.variant.price : c.product.sellingPrice;
+        const costPrice =
+          c.variant?.costPrice && c.variant.costPrice > 0
+            ? c.variant.costPrice
+            : c.product.costPrice;
+        return buildCleanSaleItem({
+          productId: c.product.id,
+          name: formatDishNameWithVariant(c.product.name, c.variant?.name),
+          variantId: c.variant?.id,
+          variantName: c.variant?.name,
+          note: c.note,
+          quantity: c.quantity,
+          unitPrice,
+          costPrice,
+          sku: c.product.sku,
+          barcode: isRetail ? c.product.barcode : '',
+        });
+      }),
     [cart, isRetail]
   );
 
-  // Compute live diff when editing an occupied table order
+  // Compute live diff when editing an occupied table order (keyed by lineKey so sizes/notes are tracked)
   const tableOrderDiff = useMemo(() => {
     if (!editingTableOrder || !activeTableSession) return [];
     const origMap = new Map<string, SaleItem>();
-    activeTableSession.items.forEach((i) => origMap.set(i.productId, i));
+    activeTableSession.items.forEach((i) => {
+      const k = getLineItemKey(i);
+      const prev = origMap.get(k);
+      origMap.set(k, prev ? { ...prev, quantity: prev.quantity + i.quantity } : i);
+    });
     const draftMap = new Map<string, SaleItem>();
-    editTableItems.forEach((i) => draftMap.set(i.productId, i));
+    editTableItems.forEach((i) => {
+      const k = getLineItemKey(i);
+      const prev = draftMap.get(k);
+      draftMap.set(k, prev ? { ...prev, quantity: prev.quantity + i.quantity } : i);
+    });
 
-    const allIds = new Set<string>([...origMap.keys(), ...draftMap.keys()]);
+    const allKeys = new Set<string>([...origMap.keys(), ...draftMap.keys()]);
     const diffs: Array<{
+      lineKey: string;
       productId: string;
       name: string;
       delta: number;
@@ -545,16 +794,19 @@ export const BillingView: React.FC<BillingViewProps> = ({
       draftQty: number;
     }> = [];
 
-    allIds.forEach((pid) => {
-      const orig = origMap.get(pid);
-      const draft = draftMap.get(pid);
+    allKeys.forEach((key) => {
+      const orig = origMap.get(key);
+      const draft = draftMap.get(key);
       const origQty = orig?.quantity ?? 0;
       const draftQty = draft?.quantity ?? 0;
       const delta = draftQty - origQty;
       if (delta !== 0) {
+        const baseName = draft?.name || orig?.name || 'Item';
+        const noteSuffix = draft?.note || orig?.note ? ` [${draft?.note || orig?.note}]` : '';
         diffs.push({
-          productId: pid,
-          name: draft?.name || orig?.name || 'Item',
+          lineKey: key,
+          productId: draft?.productId || orig?.productId || '',
+          name: `${baseName}${noteSuffix}`,
           delta,
           origQty,
           draftQty,
@@ -772,11 +1024,20 @@ export const BillingView: React.FC<BillingViewProps> = ({
         });
       }
 
-      // Deduct stock ONLY for newly added cart items that track stock
+      // Deduct stock ONLY for newly added cart items that track stock (grouped by productId)
+      const trackedQtyByProduct = new Map<string, { product: Product; quantity: number }>();
       for (const c of cart) {
         if (!isProductStockTracked(c.product)) continue;
-        const nextStock = Math.max(0, Number((c.product.stock - c.quantity).toFixed(2)));
-        batch.update(doc(db, 'stores', store.id, 'products', c.product.id), {
+        const prev = trackedQtyByProduct.get(c.product.id);
+        trackedQtyByProduct.set(c.product.id, {
+          product: c.product,
+          quantity: (prev?.quantity ?? 0) + c.quantity,
+        });
+      }
+
+      trackedQtyByProduct.forEach(({ product: prod, quantity }) => {
+        const nextStock = Math.max(0, Number((prod.stock - quantity).toFixed(2)));
+        batch.update(doc(db, 'stores', store.id, 'products', prod.id), {
           stock: nextStock,
           updatedAt: serverTimestamp(),
         });
@@ -784,10 +1045,10 @@ export const BillingView: React.FC<BillingViewProps> = ({
         batch.set(doc(db, 'stores', store.id, 'stockLogs', logId), {
           ownerId,
           storeId: store.id,
-          productId: c.product.id,
-          productName: c.product.name.slice(0, BLUEPRINT_LIMITS.PRODUCT_NAME_MAX),
-          change: -c.quantity,
-          previousStock: c.product.stock,
+          productId: prod.id,
+          productName: prod.name.slice(0, BLUEPRINT_LIMITS.PRODUCT_NAME_MAX),
+          change: -quantity,
+          previousStock: prod.stock,
           newStock: nextStock,
           reason: 'sale',
           note: `${isAddOn ? 'Add-on' : 'Booked'} Table ${tableNumber}${
@@ -795,7 +1056,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
           }`.slice(0, BLUEPRINT_LIMITS.STOCK_NOTE_MAX),
           createdAt: serverTimestamp(),
         });
-      }
+      });
 
       await batch.commit();
 
@@ -860,11 +1121,17 @@ export const BillingView: React.FC<BillingViewProps> = ({
       return;
     }
 
+    // Aggregate net stock delta per productId so variant/note lines sum cleanly
+    const stockDeltaByProduct = new Map<string, number>();
+    tableOrderDiff.forEach((d) => {
+      stockDeltaByProduct.set(d.productId, (stockDeltaByProduct.get(d.productId) ?? 0) + d.delta);
+    });
+
     // Verify sufficient stock for any increased/newly added stock-tracked items
-    for (const d of tableOrderDiff) {
-      if (d.delta > 0) {
-        const prod = products.find((p) => p.id === d.productId);
-        if (prod && isProductStockTracked(prod) && prod.stock < d.delta) {
+    for (const [pid, netDelta] of stockDeltaByProduct.entries()) {
+      if (netDelta > 0) {
+        const prod = products.find((p) => p.id === pid);
+        if (prod && isProductStockTracked(prod) && prod.stock < netDelta) {
           setCheckoutError(
             `Only ${prod.stock} extra ${prod.unit} available in stock for ${prod.name}.`
           );
@@ -894,55 +1161,56 @@ export const BillingView: React.FC<BillingViewProps> = ({
       const batch = writeBatch(db);
       const tableRef = doc(db, 'stores', store.id, 'tables', activeTableSession.id);
 
-      // Reconcile inventory stock for every changed stock-tracked item (restore on reduction, deduct on addition)
-      tableOrderDiff.forEach((d, idx) => {
-        const prod = products.find((p) => p.id === d.productId);
+      // Reconcile inventory stock for every changed stock-tracked item (grouped by productId)
+      let stockLogIdx = 0;
+      stockDeltaByProduct.forEach((netDelta, pid) => {
+        if (netDelta === 0) return;
+        const prod = products.find((p) => p.id === pid);
         if (!prod || !isProductStockTracked(prod)) return;
         const currentStock = Number.isFinite(Number(prod.stock)) ? Number(prod.stock) : 0;
         const nextStock = Math.max(
           0,
-          Math.min(10000000, Number((currentStock - d.delta).toFixed(2)))
+          Math.min(10000000, Number((currentStock - netDelta).toFixed(2)))
         );
         batch.update(doc(db, 'stores', store.id, 'products', prod.id), {
           stock: nextStock,
           updatedAt: serverTimestamp(),
         });
 
-        const logId = `${generateSafeId('log')}_${idx}`;
+        const logId = `${generateSafeId('log')}_${stockLogIdx++}`;
         batch.set(doc(db, 'stores', store.id, 'stockLogs', logId), {
           ownerId,
           storeId: store.id,
           productId: prod.id,
           productName: String(prod.name || 'Item').slice(0, BLUEPRINT_LIMITS.PRODUCT_NAME_MAX),
-          change: Number((-d.delta).toFixed(2)),
+          change: Number((-netDelta).toFixed(2)),
           previousStock: currentStock,
           newStock: nextStock,
-          reason: d.delta > 0 ? 'sale' : 'adjustment',
+          reason: netDelta > 0 ? 'sale' : 'adjustment',
           note: (isCancellingTable
             ? `Cancelled Table ${tableNum}${finalEmpName ? ` by ${finalEmpName}` : ''}`
-            : d.delta > 0
-            ? `Table ${tableNum} edit (+${d.delta})${finalEmpName ? ` by ${finalEmpName}` : ''}`
-            : `Table ${tableNum} edit (${d.delta})${finalEmpName ? ` by ${finalEmpName}` : ''}`
+            : netDelta > 0
+            ? `Table ${tableNum} edit (+${netDelta})${finalEmpName ? ` by ${finalEmpName}` : ''}`
+            : `Table ${tableNum} edit (${netDelta})${finalEmpName ? ` by ${finalEmpName}` : ''}`
           ).slice(0, BLUEPRINT_LIMITS.STOCK_NOTE_MAX),
           createdAt: serverTimestamp(),
         });
       });
 
-      const sanitizedItems: SaleItem[] = editTableItems.map((item) => {
-        const qty = Math.max(1, Number(item.quantity) || 1);
-        const unitPrice = Math.max(0, Number(item.unitPrice) || 0);
-        const costPrice = Math.max(0, Number(item.costPrice) || 0);
-        return {
+      const sanitizedItems: SaleItem[] = editTableItems.map((item) =>
+        buildCleanSaleItem({
           productId: String(item.productId),
           name: String(item.name || 'Item').slice(0, BLUEPRINT_LIMITS.PRODUCT_NAME_MAX),
-          quantity: qty,
-          unitPrice,
-          costPrice,
-          lineTotal: Number((unitPrice * qty).toFixed(2)),
+          variantId: item.variantId,
+          variantName: item.variantName,
+          note: item.note,
+          quantity: Math.max(1, Number(item.quantity) || 1),
+          unitPrice: Math.max(0, Number(item.unitPrice) || 0),
+          costPrice: Math.max(0, Number(item.costPrice) || 0),
           sku: String(item.sku ?? '').slice(0, BLUEPRINT_LIMITS.SKU_MAX),
           barcode: isRetail ? String(item.barcode ?? '').slice(0, BLUEPRINT_LIMITS.BARCODE_MAX) : '',
-        };
-      });
+        })
+      );
 
       if (isCancellingTable) {
         batch.delete(tableRef);
@@ -1027,6 +1295,190 @@ export const BillingView: React.FC<BillingViewProps> = ({
         );
       } catch {
         // Error already logged with structured context and displayed in checkoutError
+      }
+    } finally {
+      setProcessing(false);
+    }
+  };
+
+  const openTransferModal = () => {
+    if (isRetail || orderType !== 'dine_in' || !activeTableSession || editingTableOrder) return;
+    if (cart.length > 0) {
+      setCheckoutError(
+        'Please send/book or clear your unsaved add-on items before shifting or merging this table.'
+      );
+      return;
+    }
+    const candidates = tableNumbersList.filter((n) => n !== activeTableSession.tableNumber);
+    if (candidates.length === 0) {
+      setCheckoutError('No other tables configured to transfer or merge into.');
+      return;
+    }
+    const firstEmpty = candidates.find((n) => !tableSessionMap.has(n));
+    setTransferTargetTable(firstEmpty ?? candidates[0]);
+    setTransferNotifyKot(false);
+    setTransferError(null);
+    setTransferModalOpen(true);
+  };
+
+  const handleConfirmTableTransferOrMerge = async () => {
+    if (!activeTableSession || !transferTargetTable) return;
+    const sourceSession = activeTableSession;
+    const targetTable = transferTargetTable.trim().slice(0, BLUEPRINT_LIMITS.TABLE_MAX);
+    if (!targetTable || targetTable === sourceSession.tableNumber) {
+      setTransferError('Please select a different target table.');
+      return;
+    }
+
+    const targetSession = tableSessionMap.get(targetTable) ?? null;
+    const isMerge = !!targetSession;
+
+    const sanitizeItem = (item: SaleItem): SaleItem =>
+      buildCleanSaleItem({
+        productId: String(item.productId),
+        name: String(item.name || 'Item').slice(0, BLUEPRINT_LIMITS.PRODUCT_NAME_MAX),
+        variantId: item.variantId,
+        variantName: item.variantName,
+        note: item.note,
+        quantity: Math.max(1, Number(item.quantity) || 1),
+        unitPrice: Math.max(0, Number(item.unitPrice) || 0),
+        costPrice: Math.max(0, Number(item.costPrice) || 0),
+        sku: String(item.sku ?? '').slice(0, BLUEPRINT_LIMITS.SKU_MAX),
+        barcode: '',
+      });
+
+    const sourceItems = sourceSession.items.map(sanitizeItem);
+    const finalItems = targetSession
+      ? mergeSaleItems(targetSession.items.map(sanitizeItem), sourceItems)
+      : sourceItems;
+
+    if (finalItems.length > BLUEPRINT_LIMITS.SALE_ITEMS_MAX) {
+      setTransferError(
+        `Merged bill exceeds maximum ${BLUEPRINT_LIMITS.SALE_ITEMS_MAX} distinct line items.`
+      );
+      return;
+    }
+
+    const finalCount = finalItems.reduce((acc, i) => acc + i.quantity, 0);
+    const finalSubtotal = Number(finalItems.reduce((acc, i) => acc + i.lineTotal, 0).toFixed(2));
+    const finalCost = Number(
+      finalItems.reduce((acc, i) => acc + i.costPrice * i.quantity, 0).toFixed(2)
+    );
+
+    const guestParts = [targetSession?.customerName?.trim(), sourceSession.customerName?.trim()].filter(
+      (v): v is string => !!v
+    );
+    const combinedCustomerName = Array.from(new Set(guestParts))
+      .join(' & ')
+      .slice(0, BLUEPRINT_LIMITS.CUSTOMER_NAME_MAX);
+
+    const finalEmpId = (targetSession?.employeeId || sourceSession.employeeId || '').slice(0, 128);
+    const finalEmpName = (targetSession?.employeeName || sourceSession.employeeName || '').slice(
+      0,
+      BLUEPRINT_LIMITS.EMPLOYEE_NAME_MAX
+    );
+
+    const targetTableId = `table_${targetTable.replace(/[^a-zA-Z0-9_\-]/g, '')}`;
+    const targetPath = `stores/${store.id}/tables/${targetTableId}`;
+
+    setProcessing(true);
+    setTransferError(null);
+    setCheckoutError(null);
+
+    try {
+      const batch = writeBatch(db);
+      const targetRef = doc(db, 'stores', store.id, 'tables', targetTableId);
+
+      if (targetSession) {
+        batch.update(doc(db, 'stores', store.id, 'tables', targetSession.id), {
+          items: finalItems,
+          itemCount: finalCount,
+          subtotal: finalSubtotal,
+          totalCost: finalCost,
+          customerName: combinedCustomerName,
+          employeeId: finalEmpId,
+          employeeName: finalEmpName,
+          updatedAt: serverTimestamp(),
+        });
+      } else {
+        batch.set(targetRef, {
+          ownerId,
+          storeId: store.id,
+          tableNumber: targetTable,
+          status: 'occupied',
+          items: finalItems,
+          itemCount: finalCount,
+          subtotal: finalSubtotal,
+          totalCost: finalCost,
+          customerName: combinedCustomerName,
+          employeeId: finalEmpId,
+          employeeName: finalEmpName,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      }
+
+      batch.delete(doc(db, 'stores', store.id, 'tables', sourceSession.id));
+      await batch.commit();
+
+      setTransferModalOpen(false);
+      setTableNumber(targetTable);
+      setCustomerName(combinedCustomerName);
+      setSelectedEmployeeId(finalEmpId);
+
+      showTempNotice(
+        isMerge
+          ? `Table ${sourceSession.tableNumber} merged into Table ${targetTable}!`
+          : `Table ${sourceSession.tableNumber} shifted to Table ${targetTable}!`
+      );
+
+      if (transferNotifyKot) {
+        const changeNotes = [
+          isMerge
+            ? `MERGED: Table ${sourceSession.tableNumber} + Table ${targetTable} → Table ${targetTable}`
+            : `SHIFTED: Table ${sourceSession.tableNumber} → Table ${targetTable}`,
+        ];
+        const kotSalePreview: Sale = {
+          id: `kot_shift_${Date.now()}`,
+          ownerId,
+          storeId: store.id,
+          invoiceNumber: `${isMerge ? 'KOT-MRG' : 'KOT-SHF'}-T${targetTable}`,
+          dateKey: getTodayDateKey(),
+          items: finalItems,
+          itemCount: finalCount,
+          subtotal: finalSubtotal,
+          discount: 0,
+          taxRate: 0,
+          taxAmount: 0,
+          total: finalSubtotal,
+          totalCost: 0,
+          profit: 0,
+          paymentMethod: 'cash',
+          amountTendered: 0,
+          changeDue: 0,
+          orderType: 'dine_in',
+          tableNumber: targetTable,
+          customerName: combinedCustomerName,
+          employeeId: finalEmpId,
+          employeeName: finalEmpName,
+          status: 'completed',
+          createdAt: null,
+          updatedAt: null,
+        };
+        onPrintJob({
+          type: 'kot',
+          sale: kotSalePreview,
+          isRevised: true,
+          changeNotes,
+        });
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Unable to complete table transfer.';
+      setTransferError(`Could not ${isMerge ? 'merge' : 'transfer'} table: ${msg}`);
+      try {
+        handleFirestoreError(err, isMerge ? OperationType.UPDATE : OperationType.CREATE, targetPath);
+      } catch {
+        // Logged & surfaced in transferError
       }
     } finally {
       setProcessing(false);
@@ -1142,11 +1594,20 @@ export const BillingView: React.FC<BillingViewProps> = ({
         updatedAt: serverTimestamp(),
       });
 
-      // Deduct stock ONLY for items currently in the unsaved cart that track stock (booked table items already deducted)
+      // Deduct stock ONLY for items currently in the unsaved cart that track stock (grouped by productId)
+      const trackedCartByProduct = new Map<string, { product: Product; quantity: number }>();
       for (const c of cart) {
         if (!isProductStockTracked(c.product)) continue;
-        const nextStock = Math.max(0, Number((c.product.stock - c.quantity).toFixed(2)));
-        const prodRef = doc(db, 'stores', store.id, 'products', c.product.id);
+        const prev = trackedCartByProduct.get(c.product.id);
+        trackedCartByProduct.set(c.product.id, {
+          product: c.product,
+          quantity: (prev?.quantity ?? 0) + c.quantity,
+        });
+      }
+
+      trackedCartByProduct.forEach(({ product: prod, quantity }) => {
+        const nextStock = Math.max(0, Number((prod.stock - quantity).toFixed(2)));
+        const prodRef = doc(db, 'stores', store.id, 'products', prod.id);
         batch.update(prodRef, {
           stock: nextStock,
           updatedAt: serverTimestamp(),
@@ -1157,10 +1618,10 @@ export const BillingView: React.FC<BillingViewProps> = ({
         batch.set(logRef, {
           ownerId,
           storeId: store.id,
-          productId: c.product.id,
-          productName: c.product.name.slice(0, BLUEPRINT_LIMITS.PRODUCT_NAME_MAX),
-          change: -c.quantity,
-          previousStock: c.product.stock,
+          productId: prod.id,
+          productName: prod.name.slice(0, BLUEPRINT_LIMITS.PRODUCT_NAME_MAX),
+          change: -quantity,
+          previousStock: prod.stock,
           newStock: nextStock,
           reason: 'sale',
           note: `Invoice ${invoiceNumber}${finalEmpName ? ` by ${finalEmpName}` : ''}`.slice(
@@ -1169,7 +1630,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
           ),
           createdAt: serverTimestamp(),
         });
-      }
+      });
 
       // If settling an occupied dine-in table, clear the table so it becomes Empty
       if (activeTableSession) {
@@ -1268,9 +1729,18 @@ export const BillingView: React.FC<BillingViewProps> = ({
             {activeTableSession?.employeeName ? ` · ${activeTableSession.employeeName}` : ''}
           </p>
         </div>
-        <div className="flex items-center gap-1.5 shrink-0">
+        <div className="flex flex-wrap items-center justify-end gap-1.5 shrink-0">
           {activeTableSession && !editingTableOrder && (
             <>
+              <button
+                type="button"
+                onClick={openTransferModal}
+                className="inline-flex items-center gap-1 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-2 py-1.5 text-xs font-semibold text-slate-800 dark:text-slate-100 hover:bg-slate-50 dark:hover:bg-slate-700 whitespace-nowrap cursor-pointer"
+                title="Transfer to another table or merge with another occupied table"
+              >
+                <ArrowRightLeft className="w-3.5 h-3.5 shrink-0" />
+                <span>Shift / Merge</span>
+              </button>
               <button
                 type="button"
                 onClick={handlePrintProformaBill}
@@ -1635,48 +2105,73 @@ export const BillingView: React.FC<BillingViewProps> = ({
               </div>
             ) : (
               <div className="divide-y divide-slate-100 dark:divide-slate-800">
-                {editTableItems.map((item) => (
-                  <div key={item.productId} className="py-2.5 flex items-center justify-between gap-2">
-                    <div className="min-w-0 flex-1">
-                      <div className="text-sm font-medium text-slate-900 dark:text-slate-100 truncate">
-                        {item.name}
+                {editTableItems.map((item) => {
+                  const lineKey = getLineItemKey(item);
+                  return (
+                    <div key={lineKey} className="py-2.5 flex items-center justify-between gap-2">
+                      <div className="min-w-0 flex-1">
+                        <div className="text-sm font-medium text-slate-900 dark:text-slate-100 truncate">
+                          {item.name}
+                        </div>
+                        <div className="text-xs text-slate-500 dark:text-slate-400 font-mono tabular-nums">
+                          {formatMoney(item.unitPrice, store.currency)} × {item.quantity}
+                        </div>
+                        {item.note && (
+                          <div className="text-[11px] font-medium text-amber-700 dark:text-amber-300 mt-0.5 truncate">
+                            Note: {item.note}
+                          </div>
+                        )}
+                        {!isRetail && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setNoteTarget({
+                                mode: 'edit_table',
+                                lineKey,
+                                title: item.name,
+                              });
+                              setNoteDraft(item.note || '');
+                            }}
+                            className="mt-1 inline-flex items-center gap-1 text-[11px] font-medium brand-text hover:underline cursor-pointer"
+                          >
+                            <StickyNote className="w-3 h-3" />
+                            <span>{item.note ? 'Edit Note' : '+ Kitchen Note'}</span>
+                          </button>
+                        )}
                       </div>
-                      <div className="text-xs text-slate-500 dark:text-slate-400 font-mono tabular-nums">
-                        {formatMoney(item.unitPrice, store.currency)} × {item.quantity}
-                      </div>
-                    </div>
 
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      <button
-                        type="button"
-                        onClick={() => updateEditTableItemQty(item.productId, -1)}
-                        className="w-8 h-8 rounded-lg border border-slate-200 dark:border-slate-700 flex items-center justify-center text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
-                        aria-label={`Decrease ${item.name}`}
-                      >
-                        <Minus className="w-3.5 h-3.5" />
-                      </button>
-                      <span className="w-7 text-center text-xs font-mono font-semibold tabular-nums text-slate-900 dark:text-slate-100">
-                        {item.quantity}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => updateEditTableItemQty(item.productId, 1)}
-                        className="w-8 h-8 rounded-lg border border-slate-200 dark:border-slate-700 flex items-center justify-center text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
-                        aria-label={`Increase ${item.name}`}
-                      >
-                        <Plus className="w-3.5 h-3.5" />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => removeEditTableItem(item.productId)}
-                        className="w-8 h-8 rounded-lg flex items-center justify-center text-slate-400 hover:text-red-600 dark:hover:text-red-400 cursor-pointer"
-                        aria-label={`Remove ${item.name}`}
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => updateEditTableItemQty(lineKey, -1)}
+                          className="w-8 h-8 rounded-lg border border-slate-200 dark:border-slate-700 flex items-center justify-center text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                          aria-label={`Decrease ${item.name}`}
+                        >
+                          <Minus className="w-3.5 h-3.5" />
+                        </button>
+                        <span className="w-7 text-center text-xs font-mono font-semibold tabular-nums text-slate-900 dark:text-slate-100">
+                          {item.quantity}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => updateEditTableItemQty(lineKey, 1)}
+                          className="w-8 h-8 rounded-lg border border-slate-200 dark:border-slate-700 flex items-center justify-center text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                          aria-label={`Increase ${item.name}`}
+                        >
+                          <Plus className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => removeEditTableItem(lineKey)}
+                          className="w-8 h-8 rounded-lg flex items-center justify-center text-slate-400 hover:text-red-600 dark:hover:text-red-400 cursor-pointer"
+                          aria-label={`Remove ${item.name}`}
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
 
@@ -1688,7 +2183,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
                 <div className="space-y-0.5 text-[11px] font-mono">
                   {tableOrderDiff.map((d) => (
                     <div
-                      key={d.productId}
+                      key={d.lineKey}
                       className={
                         d.delta > 0
                           ? 'text-emerald-700 dark:text-emerald-400'
@@ -1731,52 +2226,69 @@ export const BillingView: React.FC<BillingViewProps> = ({
                   </button>
                 </div>
                 <div className="divide-y divide-slate-100 dark:divide-slate-800">
-                  {activeTableSession.items.map((item, idx) => (
-                    <div
-                      key={`${item.productId}-${idx}`}
-                      className="py-2 flex items-center justify-between gap-2 text-xs text-slate-700 dark:text-slate-200"
-                    >
-                      <div className="min-w-0 flex-1">
-                        <div className="font-medium truncate">{item.name}</div>
-                        <div className="text-[11px] font-mono tabular-nums text-slate-500 dark:text-slate-400">
-                          {formatMoney(item.unitPrice, store.currency)} × {item.quantity} ={' '}
-                          {formatMoney(item.lineTotal, store.currency)}
+                  {activeTableSession.items.map((item, idx) => {
+                    const lineKey = getLineItemKey(item);
+                    return (
+                      <div
+                        key={`${lineKey}-${idx}`}
+                        className="py-2 flex items-center justify-between gap-2 text-xs text-slate-700 dark:text-slate-200"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="font-medium truncate">{item.name}</div>
+                          <div className="text-[11px] font-mono tabular-nums text-slate-500 dark:text-slate-400">
+                            {formatMoney(item.unitPrice, store.currency)} × {item.quantity} ={' '}
+                            {formatMoney(item.lineTotal, store.currency)}
+                          </div>
+                          {item.note && (
+                            <div className="text-[11px] font-medium text-amber-700 dark:text-amber-300 truncate">
+                              Note: {item.note}
+                            </div>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-1 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => startEditingAndAdjustItem(lineKey, 0, false, true)}
+                            className="w-7 h-7 rounded-md border border-slate-200 dark:border-slate-700 flex items-center justify-center text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                            aria-label={`Edit note for ${item.name}`}
+                            title="Add / edit kitchen note"
+                          >
+                            <StickyNote className="w-3 h-3" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => startEditingAndAdjustItem(lineKey, -1)}
+                            className="w-7 h-7 rounded-md border border-slate-200 dark:border-slate-700 flex items-center justify-center text-slate-700 dark:text-slate-200 hover:bg-red-50 hover:border-red-300 hover:text-red-600 dark:hover:bg-red-950/40 dark:hover:text-red-400 cursor-pointer"
+                            aria-label={`Decrease ${item.name} on table`}
+                            title="Reduce quantity"
+                          >
+                            <Minus className="w-3 h-3" />
+                          </button>
+                          <span className="w-6 text-center text-xs font-mono font-semibold tabular-nums text-slate-900 dark:text-slate-100">
+                            {item.quantity}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => startEditingAndAdjustItem(lineKey, 1)}
+                            className="w-7 h-7 rounded-md border border-slate-200 dark:border-slate-700 flex items-center justify-center text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                            aria-label={`Increase ${item.name} on table`}
+                            title="Increase quantity"
+                          >
+                            <Plus className="w-3 h-3" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => startEditingAndAdjustItem(lineKey, 0, true)}
+                            className="w-7 h-7 rounded-md flex items-center justify-center text-slate-400 hover:text-red-600 dark:hover:text-red-400 cursor-pointer"
+                            aria-label={`Remove ${item.name} from table`}
+                            title="Remove item"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
                         </div>
                       </div>
-                      <div className="flex items-center gap-1 shrink-0">
-                        <button
-                          type="button"
-                          onClick={() => startEditingAndAdjustItem(item.productId, -1)}
-                          className="w-7 h-7 rounded-md border border-slate-200 dark:border-slate-700 flex items-center justify-center text-slate-700 dark:text-slate-200 hover:bg-red-50 hover:border-red-300 hover:text-red-600 dark:hover:bg-red-950/40 dark:hover:text-red-400 cursor-pointer"
-                          aria-label={`Decrease ${item.name} on table`}
-                          title="Reduce quantity"
-                        >
-                          <Minus className="w-3 h-3" />
-                        </button>
-                        <span className="w-6 text-center text-xs font-mono font-semibold tabular-nums text-slate-900 dark:text-slate-100">
-                          {item.quantity}
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() => startEditingAndAdjustItem(item.productId, 1)}
-                          className="w-7 h-7 rounded-md border border-slate-200 dark:border-slate-700 flex items-center justify-center text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
-                          aria-label={`Increase ${item.name} on table`}
-                          title="Increase quantity"
-                        >
-                          <Plus className="w-3 h-3" />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => startEditingAndAdjustItem(item.productId, 0, true)}
-                          className="w-7 h-7 rounded-md flex items-center justify-center text-slate-400 hover:text-red-600 dark:hover:text-red-400 cursor-pointer"
-                          aria-label={`Remove ${item.name} from table`}
-                          title="Remove item"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
             )}
@@ -1802,48 +2314,74 @@ export const BillingView: React.FC<BillingViewProps> = ({
                     New Add-On Items
                   </div>
                 )}
-                {cart.map(({ product, quantity }) => (
-                  <div key={product.id} className="py-3 flex items-center justify-between gap-2">
-                    <div className="min-w-0 flex-1">
-                      <div className="text-sm font-medium text-slate-900 dark:text-slate-100 truncate">
-                        {product.name}
+                {cart.map((c) => {
+                  const unitPrice = c.variant ? c.variant.price : c.product.sellingPrice;
+                  const displayName = formatDishNameWithVariant(c.product.name, c.variant?.name);
+                  return (
+                    <div key={c.lineKey} className="py-3 flex items-center justify-between gap-2">
+                      <div className="min-w-0 flex-1">
+                        <div className="text-sm font-medium text-slate-900 dark:text-slate-100 truncate">
+                          {displayName}
+                        </div>
+                        <div className="text-xs text-slate-500 dark:text-slate-400 font-mono tabular-nums">
+                          {formatMoney(unitPrice, store.currency)} × {c.quantity}
+                        </div>
+                        {c.note && (
+                          <div className="text-[11px] font-medium text-amber-700 dark:text-amber-300 mt-0.5 truncate">
+                            Note: {c.note}
+                          </div>
+                        )}
+                        {!isRetail && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setNoteTarget({
+                                mode: 'cart',
+                                lineKey: c.lineKey,
+                                title: displayName,
+                              });
+                              setNoteDraft(c.note || '');
+                            }}
+                            className="mt-1 inline-flex items-center gap-1 text-[11px] font-medium brand-text hover:underline cursor-pointer"
+                          >
+                            <StickyNote className="w-3 h-3" />
+                            <span>{c.note ? 'Edit Note' : '+ Kitchen Note'}</span>
+                          </button>
+                        )}
                       </div>
-                      <div className="text-xs text-slate-500 dark:text-slate-400 font-mono tabular-nums">
-                        {formatMoney(product.sellingPrice, store.currency)} × {quantity}
-                      </div>
-                    </div>
 
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      <button
-                        type="button"
-                        onClick={() => updateCartQty(product.id, -1)}
-                        className="w-8 h-8 rounded-lg border border-slate-200 dark:border-slate-700 flex items-center justify-center text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
-                        aria-label={`Decrease ${product.name}`}
-                      >
-                        <Minus className="w-3.5 h-3.5" />
-                      </button>
-                      <span className="w-7 text-center text-xs font-mono font-semibold tabular-nums text-slate-900 dark:text-slate-100">
-                        {quantity}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => updateCartQty(product.id, 1)}
-                        className="w-8 h-8 rounded-lg border border-slate-200 dark:border-slate-700 flex items-center justify-center text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
-                        aria-label={`Increase ${product.name}`}
-                      >
-                        <Plus className="w-3.5 h-3.5" />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => removeFromCart(product.id)}
-                        className="w-8 h-8 rounded-lg flex items-center justify-center text-slate-400 hover:text-red-600 dark:hover:text-red-400 cursor-pointer"
-                        aria-label={`Remove ${product.name}`}
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => updateCartQty(c.lineKey, -1)}
+                          className="w-8 h-8 rounded-lg border border-slate-200 dark:border-slate-700 flex items-center justify-center text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                          aria-label={`Decrease ${displayName}`}
+                        >
+                          <Minus className="w-3.5 h-3.5" />
+                        </button>
+                        <span className="w-7 text-center text-xs font-mono font-semibold tabular-nums text-slate-900 dark:text-slate-100">
+                          {c.quantity}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => updateCartQty(c.lineKey, 1)}
+                          className="w-8 h-8 rounded-lg border border-slate-200 dark:border-slate-700 flex items-center justify-center text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                          aria-label={`Increase ${displayName}`}
+                        >
+                          <Plus className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => removeFromCart(c.lineKey)}
+                          className="w-8 h-8 rounded-lg flex items-center justify-center text-slate-400 hover:text-red-600 dark:hover:text-red-400 cursor-pointer"
+                          aria-label={`Remove ${displayName}`}
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </>
@@ -2412,18 +2950,30 @@ export const BillingView: React.FC<BillingViewProps> = ({
         ) : (
           <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-3">
             {filteredProducts.map((product) => {
+              const hasVariants =
+                !isRetail && Array.isArray(product.variants) && product.variants.length > 0;
+              const minVariantPrice = hasVariants
+                ? Math.min(...product.variants!.map((v) => v.price))
+                : product.sellingPrice;
+
               const inCart =
                 editingTableOrder && activeTableSession
-                  ? editTableItems.find((i) => i.productId === product.id)?.quantity ?? 0
-                  : cart.find((c) => c.product.id === product.id)?.quantity ?? 0;
-              const originalOnTable =
-                activeTableSession
-                  ? activeTableSession.items.find((i) => i.productId === product.id)?.quantity ?? 0
-                  : 0;
+                  ? editTableItems
+                      .filter((i) => i.productId === product.id)
+                      .reduce((acc, i) => acc + i.quantity, 0)
+                  : cart
+                      .filter((c) => c.product.id === product.id)
+                      .reduce((acc, c) => acc + c.quantity, 0);
+              const originalOnTable = activeTableSession
+                ? activeTableSession.items
+                    .filter((i) => i.productId === product.id)
+                    .reduce((acc, i) => acc + i.quantity, 0)
+                : 0;
               const displayQty =
                 editingTableOrder && activeTableSession ? inCart : inCart > 0 ? inCart : 0;
               const canQuickDecrement =
-                inCart > 0 || (!!activeTableSession && !editingTableOrder && originalOnTable > 0);
+                !hasVariants &&
+                (inCart > 0 || (!!activeTableSession && !editingTableOrder && originalOnTable > 0));
               const tracked = isProductStockTracked(product);
               const availableStock =
                 editingTableOrder && activeTableSession
@@ -2434,12 +2984,20 @@ export const BillingView: React.FC<BillingViewProps> = ({
 
               const handleCardDecrement = (e: React.MouseEvent) => {
                 e.stopPropagation();
+                if (hasVariants) return;
                 if (editingTableOrder && activeTableSession) {
-                  updateEditTableItemQty(product.id, -1);
+                  const match = [...editTableItems]
+                    .reverse()
+                    .find((i) => i.productId === product.id);
+                  if (match) updateEditTableItemQty(getLineItemKey(match), -1);
                 } else if (inCart > 0) {
-                  updateCartQty(product.id, -1);
+                  const match = [...cart].reverse().find((c) => c.product.id === product.id);
+                  if (match) updateCartQty(match.lineKey, -1);
                 } else if (activeTableSession && originalOnTable > 0) {
-                  startEditingAndAdjustItem(product.id, -1);
+                  const match = [...activeTableSession.items]
+                    .reverse()
+                    .find((i) => i.productId === product.id);
+                  if (match) startEditingAndAdjustItem(getLineItemKey(match), -1);
                 }
               };
 
@@ -2484,6 +3042,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
                     <div className="mt-1 text-xs text-slate-500 dark:text-slate-400 truncate">
                       {product.category}
                       {isRetail && product.sku ? ` · ${product.sku}` : ''}
+                      {hasVariants ? ` · ${product.variants!.length} sizes` : ''}
                       {!editingTableOrder && originalOnTable > 0 ? ` · On Table: ${originalOnTable}×` : ''}
                     </div>
                   </div>
@@ -2520,11 +3079,13 @@ export const BillingView: React.FC<BillingViewProps> = ({
                     </div>
                   ) : (
                     <div className="mt-3 pt-2 border-t border-slate-100 dark:border-slate-800 flex items-baseline justify-between gap-2">
-                      <span className="text-sm font-bold font-mono tabular-nums text-slate-900 dark:text-slate-100">
-                        {formatMoney(product.sellingPrice, store.currency)}
+                      <span className="text-sm font-bold font-mono tabular-nums text-slate-900 dark:text-slate-100 truncate">
+                        {hasVariants
+                          ? `From ${formatMoney(minVariantPrice, store.currency)}`
+                          : formatMoney(product.sellingPrice, store.currency)}
                       </span>
                       <span
-                        className={`text-[11px] font-mono tabular-nums ${
+                        className={`text-[11px] font-mono tabular-nums shrink-0 ${
                           !tracked
                             ? 'text-emerald-700 dark:text-emerald-400 font-medium'
                             : isOut
@@ -2570,6 +3131,406 @@ export const BillingView: React.FC<BillingViewProps> = ({
       {mobileCartOpen && (
         <div className="lg:hidden fixed inset-0 z-40 bg-slate-950/65 flex justify-end p-2">
           <div className="w-full max-w-md h-full">{renderCartPanel()}</div>
+        </div>
+      )}
+
+      {/* Dish Size / Variant & Kitchen Note Picker Modal */}
+      {pickerProduct && (
+        <div
+          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-slate-950/65 p-0 sm:p-4"
+          role="dialog"
+          aria-modal="true"
+        >
+          <div className="w-full sm:max-w-md rounded-t-2xl sm:rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <h3 className="text-base font-bold font-display text-slate-900 dark:text-slate-100 truncate">
+                  {pickerProduct.name}
+                </h3>
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  Select portion size &amp; optional kitchen instructions
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPickerProduct(null)}
+                className="rounded-lg p-1.5 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                aria-label="Close size picker"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {pickerProduct.variants && pickerProduct.variants.length > 0 && (
+              <div className="space-y-1.5">
+                <div className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                  Select Size / Portion *
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  {pickerProduct.variants.map((v) => {
+                    const selected = pickerVariantId === v.id;
+                    return (
+                      <button
+                        key={v.id}
+                        type="button"
+                        onClick={() => setPickerVariantId(v.id)}
+                        className={`rounded-xl border px-3 py-2.5 text-left transition-colors cursor-pointer ${
+                          selected
+                            ? 'brand-border brand-soft-bg'
+                            : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 hover:border-slate-400'
+                        }`}
+                      >
+                        <div className="text-xs font-semibold text-slate-900 dark:text-slate-100 truncate">
+                          {v.name}
+                        </div>
+                        <div className="text-xs font-bold font-mono tabular-nums brand-text mt-0.5">
+                          {formatMoney(v.price, store.currency)}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                  Kitchen Note (Optional)
+                </label>
+                {pickerNote && (
+                  <button
+                    type="button"
+                    onClick={() => setPickerNote('')}
+                    className="text-[11px] text-slate-500 hover:text-red-600 cursor-pointer"
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {KITCHEN_QUICK_NOTES.map((chip) => {
+                  const active = pickerNote.toLowerCase().includes(chip.toLowerCase());
+                  return (
+                    <button
+                      key={chip}
+                      type="button"
+                      onClick={() => {
+                        if (active) return;
+                        const next = pickerNote.trim() ? `${pickerNote.trim()}, ${chip}` : chip;
+                        setPickerNote(next.slice(0, BLUEPRINT_LIMITS.KITCHEN_NOTE_MAX));
+                      }}
+                      className={`rounded-md border px-2 py-1 text-[11px] font-medium cursor-pointer ${
+                        active
+                          ? 'brand-border brand-soft-bg brand-text'
+                          : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-300'
+                      }`}
+                    >
+                      + {chip}
+                    </button>
+                  );
+                })}
+              </div>
+              <input
+                type="text"
+                maxLength={BLUEPRINT_LIMITS.KITCHEN_NOTE_MAX}
+                value={pickerNote}
+                onChange={(e) => setPickerNote(e.target.value)}
+                placeholder="e.g. Less spicy, extra garlic sauce..."
+                className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-xs text-slate-900 dark:text-slate-100"
+              />
+            </div>
+
+            <div className="flex items-center justify-between gap-3 pt-1">
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setPickerQty((q) => Math.max(1, q - 1))}
+                  className="w-9 h-9 rounded-lg border border-slate-200 dark:border-slate-700 flex items-center justify-center text-slate-700 dark:text-slate-200 cursor-pointer"
+                >
+                  <Minus className="w-4 h-4" />
+                </button>
+                <span className="w-7 text-center text-sm font-mono font-bold text-slate-900 dark:text-slate-100">
+                  {pickerQty}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setPickerQty((q) => q + 1)}
+                  className="w-9 h-9 rounded-lg border border-slate-200 dark:border-slate-700 flex items-center justify-center text-slate-700 dark:text-slate-200 cursor-pointer"
+                >
+                  <Plus className="w-4 h-4" />
+                </button>
+              </div>
+
+              <button
+                type="button"
+                onClick={handleConfirmVariantPicker}
+                className="flex-1 inline-flex items-center justify-center gap-2 rounded-xl brand-bg px-4 py-2.5 text-sm font-semibold text-white cursor-pointer"
+              >
+                <Plus className="w-4 h-4" />
+                <span>
+                  Add{' '}
+                  {formatMoney(
+                    (pickerProduct.variants?.find((v) => v.id === pickerVariantId)?.price ??
+                      pickerProduct.sellingPrice) * pickerQty,
+                    store.currency
+                  )}
+                </span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Kitchen Note Editor Modal for Cart / Table Items */}
+      {noteTarget && (
+        <div
+          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-slate-950/65 p-0 sm:p-4"
+          role="dialog"
+          aria-modal="true"
+        >
+          <div className="w-full sm:max-w-md rounded-t-2xl sm:rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 shadow-2xl space-y-4">
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <h3 className="text-base font-bold font-display text-slate-900 dark:text-slate-100 truncate">
+                  Kitchen Note — {noteTarget.title}
+                </h3>
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  Printed on KOT &amp; visible to kitchen staff
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setNoteTarget(null)}
+                className="rounded-lg p-1.5 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                aria-label="Close note editor"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="flex flex-wrap gap-1.5">
+              {KITCHEN_QUICK_NOTES.map((chip) => {
+                const active = noteDraft.toLowerCase().includes(chip.toLowerCase());
+                return (
+                  <button
+                    key={chip}
+                    type="button"
+                    onClick={() => {
+                      if (active) return;
+                      const next = noteDraft.trim() ? `${noteDraft.trim()}, ${chip}` : chip;
+                      setNoteDraft(next.slice(0, BLUEPRINT_LIMITS.KITCHEN_NOTE_MAX));
+                    }}
+                    className={`rounded-md border px-2.5 py-1 text-[11px] font-medium cursor-pointer ${
+                      active
+                        ? 'brand-border brand-soft-bg brand-text'
+                        : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-300'
+                    }`}
+                  >
+                    + {chip}
+                  </button>
+                );
+              })}
+            </div>
+
+            <input
+              type="text"
+              maxLength={BLUEPRINT_LIMITS.KITCHEN_NOTE_MAX}
+              value={noteDraft}
+              onChange={(e) => setNoteDraft(e.target.value)}
+              placeholder="Write custom cooking instruction..."
+              className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2.5 text-xs text-slate-900 dark:text-slate-100"
+            />
+
+            <div className="flex items-center justify-end gap-2">
+              {noteDraft && (
+                <button
+                  type="button"
+                  onClick={() => setNoteDraft('')}
+                  className="mr-auto text-xs font-medium text-red-600 hover:underline cursor-pointer"
+                >
+                  Clear Note
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setNoteTarget(null)}
+                className="rounded-lg border border-slate-200 dark:border-slate-700 px-3.5 py-2 text-xs font-semibold text-slate-700 dark:text-slate-300 cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleSaveKitchenNote}
+                className="rounded-lg brand-bg px-4 py-2 text-xs font-semibold text-white cursor-pointer"
+              >
+                Save Note
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Table Transfer (Shift) & Table Merge Modal */}
+      {transferModalOpen && activeTableSession && (
+        <div
+          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-slate-950/65 p-0 sm:p-4"
+          role="dialog"
+          aria-modal="true"
+        >
+          <div className="w-full sm:max-w-lg rounded-t-2xl sm:rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <h3 className="text-base font-bold font-display text-slate-900 dark:text-slate-100">
+                  Shift or Merge Table {activeTableSession.tableNumber}
+                </h3>
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  Move to an Empty table, or pick an Occupied table to combine both bills
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setTransferModalOpen(false)}
+                className="rounded-lg p-1.5 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                aria-label="Close transfer modal"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 px-3.5 py-2.5 flex items-center justify-between text-xs">
+              <span className="font-semibold text-slate-800 dark:text-slate-200">
+                From Table {activeTableSession.tableNumber} ({activeTableSession.itemCount} items)
+              </span>
+              <span className="font-mono font-bold brand-text tabular-nums">
+                {formatMoney(activeTableSession.subtotal, store.currency)}
+              </span>
+            </div>
+
+            <div className="space-y-2">
+              <div className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                Select Target Table *
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 max-h-60 overflow-y-auto pr-1">
+                {tableNumbersList
+                  .filter((num) => num !== activeTableSession.tableNumber)
+                  .map((num) => {
+                    const occ = tableSessionMap.get(num);
+                    const selected = transferTargetTable === num;
+                    return (
+                      <button
+                        key={num}
+                        type="button"
+                        onClick={() => {
+                          setTransferTargetTable(num);
+                          setTransferError(null);
+                        }}
+                        className={`rounded-xl border p-2.5 text-left transition-colors cursor-pointer ${
+                          selected
+                            ? 'brand-border brand-soft-bg ring-1 ring-inset ring-current/20'
+                            : occ
+                            ? 'border-amber-300 dark:border-amber-800 bg-amber-50/50 dark:bg-amber-950/20 hover:border-amber-500'
+                            : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 hover:border-slate-400'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-1">
+                          <span className="text-xs font-bold text-slate-900 dark:text-slate-100">
+                            Table {num}
+                          </span>
+                          <span
+                            className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${
+                              occ
+                                ? 'bg-amber-100 dark:bg-amber-900/60 text-amber-800 dark:text-amber-300'
+                                : 'bg-emerald-100 dark:bg-emerald-900/50 text-emerald-700 dark:text-emerald-300'
+                            }`}
+                          >
+                            {occ ? 'Merge' : 'Empty'}
+                          </span>
+                        </div>
+                        <div className="text-[11px] font-mono text-slate-500 dark:text-slate-400 mt-1 truncate">
+                          {occ
+                            ? `${occ.itemCount} items · ${formatMoney(occ.subtotal, store.currency)}`
+                            : 'Shift here'}
+                        </div>
+                      </button>
+                    );
+                  })}
+              </div>
+            </div>
+
+            {transferTargetTable && (
+              <div
+                className={`rounded-lg border px-3 py-2 text-xs ${
+                  tableSessionMap.has(transferTargetTable)
+                    ? 'border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/30 text-amber-900 dark:text-amber-200'
+                    : 'border-emerald-200 dark:border-emerald-900/60 bg-emerald-50 dark:bg-emerald-950/30 text-emerald-900 dark:text-emerald-200'
+                }`}
+              >
+                {tableSessionMap.has(transferTargetTable) ? (
+                  <span>
+                    <strong>Merge Preview:</strong> All items from Table{' '}
+                    {activeTableSession.tableNumber} will be combined into{' '}
+                    <strong>Table {transferTargetTable}</strong> (New total:{' '}
+                    <strong className="font-mono">
+                      {formatMoney(
+                        activeTableSession.subtotal +
+                          (tableSessionMap.get(transferTargetTable)?.subtotal ?? 0),
+                        store.currency
+                      )}
+                    </strong>
+                    ), and Table {activeTableSession.tableNumber} will become Empty.
+                  </span>
+                ) : (
+                  <span>
+                    <strong>Shift Preview:</strong> Table {activeTableSession.tableNumber} will move
+                    to <strong>Table {transferTargetTable}</strong>, and Table{' '}
+                    {activeTableSession.tableNumber} will become Empty.
+                  </span>
+                )}
+              </div>
+            )}
+
+            <label className="flex items-center gap-2 text-xs text-slate-700 dark:text-slate-300 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={transferNotifyKot}
+                onChange={(e) => setTransferNotifyKot(e.target.checked)}
+                className="rounded border-slate-300 dark:border-slate-700"
+              />
+              <span>Print Shift / Merge Notice KOT for Kitchen (optional)</span>
+            </label>
+
+            {transferError && (
+              <div className="rounded-lg border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/40 px-3 py-2 text-xs text-red-700 dark:text-red-300">
+                {transferError}
+              </div>
+            )}
+
+            <div className="flex items-center justify-end gap-2 pt-1">
+              <button
+                type="button"
+                disabled={processing}
+                onClick={() => setTransferModalOpen(false)}
+                className="rounded-xl border border-slate-200 dark:border-slate-700 px-4 py-2.5 text-xs font-semibold text-slate-700 dark:text-slate-300 cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={processing || !transferTargetTable}
+                onClick={() => void handleConfirmTableTransferOrMerge()}
+                className="flex-1 inline-flex items-center justify-center gap-2 rounded-xl brand-bg px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50 cursor-pointer"
+              >
+                <ArrowRightLeft className="w-4 h-4" />
+                <span>
+                  {processing
+                    ? 'Updating...'
+                    : tableSessionMap.has(transferTargetTable)
+                    ? `Merge into Table ${transferTargetTable}`
+                    : `Shift to Table ${transferTargetTable}`}
+                </span>
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

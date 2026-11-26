@@ -15,6 +15,7 @@ import { db, handleFirestoreError, OperationType } from '../firebase';
 import {
   BLUEPRINT_LIMITS,
   type Product,
+  type ProductVariant,
   type StockLog,
   type StockReason,
   type StoreConfig,
@@ -62,6 +63,9 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
   const [minStock, setMinStock] = useState('5');
   const [unit, setUnit] = useState(isRetail ? 'pcs' : 'plate');
   const [trackStock, setTrackStock] = useState<boolean>(isRetail);
+  const [variants, setVariants] = useState<
+    Array<{ id: string; name: string; price: string; costPrice: string }>
+  >([]);
   const [active, setActive] = useState(true);
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
@@ -128,6 +132,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
     }
     const defaultTracked = isRetail;
     setTrackStock(defaultTracked);
+    setVariants([]);
     setCostPrice('');
     setSellingPrice('');
     setStock(defaultTracked ? '20' : '0');
@@ -147,6 +152,16 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
     setCategory(product.category);
     setIsAddingNewCategory(!existingCategories.includes(product.category));
     setTrackStock(tracked);
+    setVariants(
+      !isRetail && Array.isArray(product.variants)
+        ? product.variants.map((v) => ({
+            id: v.id || generateSafeId('var'),
+            name: v.name,
+            price: String(v.price),
+            costPrice: v.costPrice && v.costPrice > 0 ? String(v.costPrice) : '',
+          }))
+        : []
+    );
     setCostPrice(product.costPrice > 0 ? String(product.costPrice) : '');
     setSellingPrice(String(product.sellingPrice));
     setStock(String(product.stock));
@@ -157,13 +172,34 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
     setFormOpen(true);
   };
 
+  const applyVariantPreset = (names: string[]) => {
+    const existingPrice = sellingPrice.trim();
+    const existingCost = costPrice.trim();
+    setVariants(
+      names.map((label, idx) => ({
+        id: generateSafeId(`var${idx}`),
+        name: label,
+        price: idx === 0 ? existingPrice : '',
+        costPrice: idx === 0 ? existingCost : '',
+      }))
+    );
+  };
+
+  const addCustomVariant = () => {
+    if (variants.length >= BLUEPRINT_LIMITS.VARIANTS_MAX) return;
+    setVariants((prev) => [
+      ...prev,
+      { id: generateSafeId('var'), name: '', price: '', costPrice: '' },
+    ]);
+  };
+
   const handleSaveProduct = async (e: React.FormEvent) => {
     e.preventDefault();
     const cleanName = name.trim();
     const cleanCat = category.trim();
     const effectiveTrackStock = isRetail ? true : trackStock;
     const parsedCost = costPrice.trim() === '' ? 0 : Number(costPrice);
-    const parsedSell = Number(sellingPrice || 0);
+    let parsedSell = Number(sellingPrice || 0);
     const parsedStock = effectiveTrackStock ? Number(stock || 0) : 0;
     const parsedMin = effectiveTrackStock ? Number(minStock || 0) : 0;
 
@@ -171,6 +207,39 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
       setFormError('Item name and category are required.');
       return;
     }
+
+    let sanitizedVariants: ProductVariant[] = [];
+    if (!isRetail && variants.length > 0) {
+      if (variants.length > BLUEPRINT_LIMITS.VARIANTS_MAX) {
+        setFormError(`Maximum ${BLUEPRINT_LIMITS.VARIANTS_MAX} sizes allowed per dish.`);
+        return;
+      }
+      for (const v of variants) {
+        const vName = v.name.trim().slice(0, BLUEPRINT_LIMITS.VARIANT_NAME_MAX);
+        const vPrice = Number(v.price);
+        const vCost = v.costPrice.trim() === '' ? 0 : Number(v.costPrice);
+        if (!vName) {
+          setFormError('Every dish size must have a name (e.g. Half, Full, Large).');
+          return;
+        }
+        if (v.price.trim() === '' || !Number.isFinite(vPrice) || vPrice < 0) {
+          setFormError(`Enter a valid price for size "${vName}".`);
+          return;
+        }
+        if (!Number.isFinite(vCost) || vCost < 0) {
+          setFormError(`Cost price for size "${vName}" must be 0 or greater.`);
+          return;
+        }
+        sanitizedVariants.push({
+          id: v.id || generateSafeId('var'),
+          name: vName,
+          price: Number(vPrice.toFixed(2)),
+          costPrice: Number(vCost.toFixed(2)),
+        });
+      }
+      parsedSell = Math.min(...sanitizedVariants.map((v) => v.price));
+    }
+
     if (
       [parsedCost, parsedSell, parsedStock, parsedMin].some((v) => !Number.isFinite(v) || v < 0)
     ) {
@@ -200,6 +269,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
           minStock: parsedMin,
           unit: unit.trim().slice(0, BLUEPRINT_LIMITS.UNIT_MAX) || 'pcs',
           trackStock: effectiveTrackStock,
+          variants: sanitizedVariants,
           active,
           updatedAt: serverTimestamp(),
         });
@@ -234,6 +304,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
           minStock: parsedMin,
           unit: unit.trim().slice(0, BLUEPRINT_LIMITS.UNIT_MAX) || 'pcs',
           trackStock: effectiveTrackStock,
+          variants: sanitizedVariants,
           active,
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
@@ -478,6 +549,18 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                           <div className="text-xs text-slate-500 dark:text-slate-400">
                             {p.sku || 'No SKU'} · {p.active ? 'Active' : 'Hidden'}
                           </div>
+                          {!isRetail && p.variants && p.variants.length > 0 && (
+                            <div className="mt-1 flex flex-wrap gap-1">
+                              {p.variants.map((v) => (
+                                <span
+                                  key={v.id}
+                                  className="inline-flex items-center rounded border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-1.5 py-0.5 text-[10px] font-mono text-slate-700 dark:text-slate-300"
+                                >
+                                  {v.name}: {formatMoney(v.price, store.currency)}
+                                </span>
+                              ))}
+                            </div>
+                          )}
                         </td>
                         <td className="py-3 px-4 text-xs text-slate-600 dark:text-slate-300">
                           {p.category}
@@ -491,7 +574,11 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                           {p.costPrice > 0 ? formatMoney(p.costPrice, store.currency) : '—'}
                         </td>
                         <td className="py-3 px-4 text-right font-mono text-xs font-semibold tabular-nums text-slate-900 dark:text-slate-100">
-                          {formatMoney(p.sellingPrice, store.currency)}
+                          {!isRetail && p.variants && p.variants.length > 0 ? (
+                            <span>From {formatMoney(p.sellingPrice, store.currency)}</span>
+                          ) : (
+                            formatMoney(p.sellingPrice, store.currency)
+                          )}
                         </td>
                         <td className="py-3 px-4 text-right font-mono text-xs tabular-nums">
                           {!tracked ? (
@@ -780,18 +867,140 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
 
                 <div>
                   <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
-                    Selling Price ({store.currency})
+                    {!isRetail && variants.length > 0
+                      ? `Starting Price (${store.currency})`
+                      : `Selling Price (${store.currency})`}
                   </label>
-                  <input
-                    type="number"
-                    required
-                    min="0"
-                    step="any"
-                    value={sellingPrice}
-                    onChange={(e) => setSellingPrice(e.target.value)}
-                    className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm font-mono tabular-nums text-slate-900 dark:text-slate-100"
-                  />
+                  {!isRetail && variants.length > 0 ? (
+                    <div className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950/60 px-3 py-2 text-sm font-mono tabular-nums text-slate-600 dark:text-slate-300">
+                      {(() => {
+                        const nums = variants.map((v) => Number(v.price)).filter((n) => Number.isFinite(n) && n >= 0);
+                        return nums.length > 0
+                          ? `Auto: ${formatMoney(Math.min(...nums), store.currency)}`
+                          : 'Set size prices below';
+                      })()}
+                    </div>
+                  ) : (
+                    <input
+                      type="number"
+                      required
+                      min="0"
+                      step="any"
+                      value={sellingPrice}
+                      onChange={(e) => setSellingPrice(e.target.value)}
+                      className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm font-mono tabular-nums text-slate-900 dark:text-slate-100"
+                    />
+                  )}
                 </div>
+
+                {!isRetail && (
+                  <div className="sm:col-span-2 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/40 p-3 space-y-2.5">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <div className="text-xs font-semibold text-slate-800 dark:text-slate-200">
+                          Sizes / Portions (Optional)
+                        </div>
+                        <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                          Add Half / Full or Small / Medium / Large pricing
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        {variants.length === 0 && (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => applyVariantPreset(['Half', 'Full'])}
+                              className="rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-1 text-[11px] font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                            >
+                              + Half / Full
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => applyVariantPreset(['Small', 'Medium', 'Large'])}
+                              className="rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-1 text-[11px] font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                            >
+                              + S / M / L
+                            </button>
+                          </>
+                        )}
+                        <button
+                          type="button"
+                          disabled={variants.length >= BLUEPRINT_LIMITS.VARIANTS_MAX}
+                          onClick={addCustomVariant}
+                          className="inline-flex items-center gap-1 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-2.5 py-1 text-[11px] font-semibold brand-text hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-40 cursor-pointer"
+                        >
+                          <Plus className="w-3 h-3" />
+                          <span>Add Size</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    {variants.length > 0 && (
+                      <div className="space-y-2">
+                        {variants.map((v, idx) => (
+                          <div key={v.id} className="grid grid-cols-12 gap-2 items-center">
+                            <input
+                              type="text"
+                              required
+                              maxLength={BLUEPRINT_LIMITS.VARIANT_NAME_MAX}
+                              value={v.name}
+                              onChange={(e) =>
+                                setVariants((prev) =>
+                                  prev.map((item, i) =>
+                                    i === idx ? { ...item, name: e.target.value } : item
+                                  )
+                                )
+                              }
+                              placeholder="Size (e.g. Half)"
+                              className="col-span-5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-2.5 py-1.5 text-xs text-slate-900 dark:text-slate-100"
+                            />
+                            <input
+                              type="number"
+                              required
+                              min="0"
+                              step="any"
+                              value={v.price}
+                              onChange={(e) =>
+                                setVariants((prev) =>
+                                  prev.map((item, i) =>
+                                    i === idx ? { ...item, price: e.target.value } : item
+                                  )
+                                )
+                              }
+                              placeholder={`Price (${store.currency})`}
+                              className="col-span-3 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-2.5 py-1.5 text-xs font-mono tabular-nums text-slate-900 dark:text-slate-100"
+                            />
+                            <input
+                              type="number"
+                              min="0"
+                              step="any"
+                              value={v.costPrice}
+                              onChange={(e) =>
+                                setVariants((prev) =>
+                                  prev.map((item, i) =>
+                                    i === idx ? { ...item, costPrice: e.target.value } : item
+                                  )
+                                )
+                              }
+                              placeholder="Cost (opt)"
+                              className="col-span-3 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-2.5 py-1.5 text-xs font-mono tabular-nums text-slate-900 dark:text-slate-100"
+                            />
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setVariants((prev) => prev.filter((_, i) => i !== idx))
+                              }
+                              className="col-span-1 flex items-center justify-center rounded-lg p-1.5 text-slate-400 hover:text-red-600 dark:hover:text-red-400 cursor-pointer"
+                              aria-label={`Remove size ${v.name || idx + 1}`}
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 {!isRetail && (
                   <div className="sm:col-span-2 space-y-1.5">

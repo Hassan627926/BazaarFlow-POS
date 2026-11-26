@@ -347,14 +347,19 @@ export const KitchenKotQueueView: React.FC<KitchenKotQueueViewProps> = ({
                       {ticket.items.map((item, idx) => (
                         <div
                           key={`${item.productId}-${idx}`}
-                          className="py-1.5 flex items-center justify-between gap-2 text-xs"
+                          className="py-1.5 space-y-0.5 text-xs"
                         >
-                          <span className="font-semibold text-slate-900 dark:text-slate-100">
+                          <div className="font-semibold text-slate-900 dark:text-slate-100">
                             <span className="font-mono font-bold brand-text mr-2">
                               {item.quantity}x
                             </span>
                             {item.name}
-                          </span>
+                          </div>
+                          {item.note && (
+                            <div className="pl-6 text-[11px] font-semibold text-amber-800 dark:text-amber-300">
+                              ↳ {item.note}
+                            </div>
+                          )}
                         </div>
                       ))}
                     </div>
@@ -431,7 +436,9 @@ export const KitchenKotQueueView: React.FC<KitchenKotQueueViewProps> = ({
                       </div>
                     </td>
                     <td className="py-2.5 px-4 text-slate-700 dark:text-slate-300 max-w-xs truncate">
-                      {ticket.items.map((i) => `${i.quantity}x ${i.name}`).join(', ')}
+                      {ticket.items
+                        .map((i) => `${i.quantity}x ${i.name}${i.note ? ` [${i.note}]` : ''}`)
+                        .join(', ')}
                     </td>
                     <td className="py-2.5 px-4 text-slate-600 dark:text-slate-400">
                       {ticket.employeeName || '—'}

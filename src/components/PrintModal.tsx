@@ -49,6 +49,9 @@ function buildWhatsAppReceiptText(sale: Sale, store: StoreConfig, isProforma = f
   lines.push('*Items:*');
   sale.items.forEach((item, idx) => {
     lines.push(`${idx + 1}. ${item.name}`);
+    if (item.note) {
+      lines.push(`   Note: ${item.note}`);
+    }
     lines.push(
       `   ${item.quantity} × ${formatMoney(item.unitPrice, store.currency)} = ${formatMoney(
         item.lineTotal,
@@ -324,6 +327,9 @@ export const PrintModal: React.FC<PrintModalProps> = ({
               <tr key={`${item.productId}-${idx}`}>
                 <td className="py-1.5 pr-2">
                   <div className="font-medium text-slate-900">{item.name}</div>
+                  {item.note && (
+                    <div className="text-[10px] italic text-slate-700">Note: {item.note}</div>
+                  )}
                   <div className="text-[10px] text-slate-500">
                     @ {formatMoney(item.unitPrice, store.currency)}
                   </div>
@@ -436,9 +442,16 @@ export const PrintModal: React.FC<PrintModalProps> = ({
           </div>
         )}
         {sale.items.map((item, idx) => (
-          <div key={`${item.productId}-${idx}`} className="flex items-start justify-between text-sm">
-            <span className="font-bold pr-3 tabular-nums">{item.quantity}x</span>
-            <span className="flex-1 font-medium">{item.name}</span>
+          <div key={`${item.productId}-${idx}`} className="space-y-0.5">
+            <div className="flex items-start justify-between text-sm">
+              <span className="font-bold pr-3 tabular-nums">{item.quantity}x</span>
+              <span className="flex-1 font-medium">{item.name}</span>
+            </div>
+            {item.note && (
+              <div className="pl-7 text-xs font-bold uppercase tracking-tight text-slate-900">
+                ↳ {item.note}
+              </div>
+            )}
           </div>
         ))}
       </div>
