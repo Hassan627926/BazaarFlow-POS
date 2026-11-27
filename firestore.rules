@@ -115,8 +115,8 @@ service cloud.firestore {
         ]) &&
         data.keys().hasOnly([
           'ownerId', 'name', 'businessType', 'logoDataUrl', 'primaryColor',
-          'accentColor', 'currency', 'taxRate', 'tableCount', 'address', 'phone',
-          'receiptFooter', 'createdAt', 'updatedAt'
+          'accentColor', 'currency', 'taxRate', 'tableCount', 'serviceChargeRate',
+          'defaultDeliveryFee', 'address', 'phone', 'receiptFooter', 'createdAt', 'updatedAt'
         ]) &&
         isValidId(data.ownerId) &&
         data.ownerId == request.auth.uid &&
@@ -128,6 +128,8 @@ service cloud.firestore {
         data.currency is string && data.currency.size() >= 1 && data.currency.size() <= 10 &&
         data.taxRate is number && data.taxRate >= 0 && data.taxRate <= 50 &&
         (!('tableCount' in data) || (data.tableCount is number && data.tableCount >= 1 && data.tableCount <= 60)) &&
+        (!('serviceChargeRate' in data) || (data.serviceChargeRate is number && data.serviceChargeRate >= 0 && data.serviceChargeRate <= 30)) &&
+        (!('defaultDeliveryFee' in data) || (data.defaultDeliveryFee is number && data.defaultDeliveryFee >= 0 && data.defaultDeliveryFee <= 100000)) &&
         data.address is string && data.address.size() <= 200 &&
         data.phone is string && data.phone.size() <= 32 &&
         data.receiptFooter is string && data.receiptFooter.size() <= 180 &&
@@ -175,11 +177,11 @@ service cloud.firestore {
         ]) &&
         data.keys().hasOnly([
           'ownerId', 'storeId', 'invoiceNumber', 'dateKey', 'items',
-          'itemCount', 'subtotal', 'discount', 'taxRate', 'taxAmount',
-          'total', 'totalCost', 'profit', 'paymentMethod', 'amountTendered',
-          'changeDue', 'orderType', 'tableNumber', 'customerName',
-          'customerPhone', 'customerAddress', 'employeeId', 'employeeName',
-          'settledBy', 'status', 'createdAt', 'updatedAt'
+          'itemCount', 'subtotal', 'discount', 'serviceChargeRate', 'serviceChargeAmount',
+          'deliveryFee', 'taxRate', 'taxAmount', 'total', 'totalCost', 'profit',
+          'tokenNumber', 'paymentMethod', 'paymentSplit', 'amountTendered', 'changeDue', 'orderType',
+          'tableNumber', 'customerName', 'customerPhone', 'customerAddress',
+          'employeeId', 'employeeName', 'settledBy', 'status', 'createdAt', 'updatedAt'
         ]) &&
         isValidId(data.ownerId) &&
         isValidId(data.storeId) &&
@@ -190,12 +192,23 @@ service cloud.firestore {
         data.itemCount is number && data.itemCount >= 1 && data.itemCount <= 10000 &&
         data.subtotal is number && data.subtotal >= 0 && data.subtotal <= 100000000 &&
         data.discount is number && data.discount >= 0 && data.discount <= 100000000 &&
+        (!('serviceChargeRate' in data) || (data.serviceChargeRate is number && data.serviceChargeRate >= 0 && data.serviceChargeRate <= 30)) &&
+        (!('serviceChargeAmount' in data) || (data.serviceChargeAmount is number && data.serviceChargeAmount >= 0 && data.serviceChargeAmount <= 10000000)) &&
+        (!('deliveryFee' in data) || (data.deliveryFee is number && data.deliveryFee >= 0 && data.deliveryFee <= 1000000)) &&
         data.taxRate is number && data.taxRate >= 0 && data.taxRate <= 50 &&
         data.taxAmount is number && data.taxAmount >= 0 && data.taxAmount <= 100000000 &&
         data.total is number && data.total >= 0 && data.total <= 100000000 &&
         data.totalCost is number && data.totalCost >= 0 && data.totalCost <= 100000000 &&
         data.profit is number && data.profit >= -100000000 && data.profit <= 100000000 &&
-        data.paymentMethod in ['cash', 'card', 'bank_qr'] &&
+        (!('tokenNumber' in data) || (data.tokenNumber is number && data.tokenNumber >= 1 && data.tokenNumber <= 99999)) &&
+        data.paymentMethod in ['cash', 'card', 'bank_qr', 'split'] &&
+        (!('paymentSplit' in data) || (
+          data.paymentSplit is map &&
+          data.paymentSplit.keys().hasOnly(['cash', 'card', 'bank_qr']) &&
+          (!('cash' in data.paymentSplit) || (data.paymentSplit.cash is number && data.paymentSplit.cash >= 0 && data.paymentSplit.cash <= 100000000)) &&
+          (!('card' in data.paymentSplit) || (data.paymentSplit.card is number && data.paymentSplit.card >= 0 && data.paymentSplit.card <= 100000000)) &&
+          (!('bank_qr' in data.paymentSplit) || (data.paymentSplit.bank_qr is number && data.paymentSplit.bank_qr <= 100000000 && data.paymentSplit.bank_qr >= 0))
+        )) &&
         data.amountTendered is number && data.amountTendered >= 0 && data.amountTendered <= 100000000 &&
         data.changeDue is number && data.changeDue >= 0 && data.changeDue <= 100000000 &&
         data.orderType in ['retail', 'dine_in', 'takeaway', 'delivery'] &&
@@ -373,7 +386,7 @@ service cloud.firestore {
           'status', 'createdAt', 'updatedAt'
         ]) &&
         data.keys().hasOnly([
-          'ownerId', 'storeId', 'ticketNumber', 'tableNumber', 'orderType',
+          'ownerId', 'storeId', 'ticketNumber', 'tokenNumber', 'tableNumber', 'orderType',
           'ticketKind', 'items', 'itemCount', 'changeNotes', 'customerName',
           'employeeId', 'employeeName', 'source', 'status', 'kitchenStatus',
           'createdAt', 'updatedAt'
@@ -382,6 +395,7 @@ service cloud.firestore {
         isValidId(data.storeId) &&
         data.storeId == storeId &&
         data.ticketNumber is string && data.ticketNumber.size() >= 1 && data.ticketNumber.size() <= 40 &&
+        (!('tokenNumber' in data) || (data.tokenNumber is number && data.tokenNumber >= 1 && data.tokenNumber <= 99999)) &&
         data.tableNumber is string && data.tableNumber.size() <= 20 &&
         data.orderType in ['retail', 'dine_in', 'takeaway', 'delivery'] &&
         data.ticketKind in ['new', 'addon', 'revised', 'reprint'] &&
@@ -469,7 +483,8 @@ service cloud.firestore {
           // Action: Update Brand & Store Settings
           incoming().diff(existing()).affectedKeys().hasOnly([
             'name', 'businessType', 'logoDataUrl', 'primaryColor', 'accentColor',
-            'currency', 'taxRate', 'tableCount', 'address', 'phone', 'receiptFooter', 'updatedAt'
+            'currency', 'taxRate', 'tableCount', 'serviceChargeRate', 'defaultDeliveryFee',
+            'address', 'phone', 'receiptFooter', 'updatedAt'
           ])
         );
 

@@ -47,6 +47,14 @@
           "type": "number",
           "description": "Optional number of dine-in tables for restaurant workspaces (1 to 60)."
         },
+        "serviceChargeRate": {
+          "type": "number",
+          "description": "Optional default Dine-In service charge percentage for restaurant workspaces (0 to 30)."
+        },
+        "defaultDeliveryFee": {
+          "type": "number",
+          "description": "Optional default delivery charge for restaurant delivery orders."
+        },
         "address": {
           "type": "string",
           "maxLength": 200
@@ -136,12 +144,20 @@
         "itemCount": { "type": "number" },
         "subtotal": { "type": "number" },
         "discount": { "type": "number" },
+        "serviceChargeRate": { "type": "number" },
+        "serviceChargeAmount": { "type": "number" },
+        "deliveryFee": { "type": "number" },
         "taxRate": { "type": "number" },
         "taxAmount": { "type": "number" },
         "total": { "type": "number" },
         "totalCost": { "type": "number" },
         "profit": { "type": "number" },
-        "paymentMethod": { "type": "string", "enum": ["cash", "card", "bank_qr"] },
+        "tokenNumber": { "type": "number" },
+        "paymentMethod": { "type": "string", "enum": ["cash", "card", "bank_qr", "split"] },
+        "paymentSplit": {
+          "type": "object",
+          "description": "Optional per-tender applied amounts when paymentMethod is split (cash, card, bank_qr)."
+        },
         "amountTendered": { "type": "number" },
         "changeDue": { "type": "number" },
         "orderType": { "type": "string", "enum": ["retail", "dine_in", "takeaway", "delivery"] },
@@ -379,6 +395,7 @@
         "ownerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "storeId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "ticketNumber": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "tokenNumber": { "type": "number" },
         "tableNumber": { "type": "string", "maxLength": 20 },
         "orderType": { "type": "string", "enum": ["retail", "dine_in", "takeaway", "delivery"] },
         "ticketKind": { "type": "string", "enum": ["new", "addon", "revised", "reprint"] },

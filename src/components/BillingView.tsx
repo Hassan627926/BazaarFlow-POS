@@ -23,6 +23,7 @@ import {
   User,
   UserCheck,
   Utensils,
+  Wallet,
   X,
 } from 'lucide-react';
 import { doc, serverTimestamp, updateDoc, writeBatch } from 'firebase/firestore';
@@ -45,6 +46,8 @@ import {
   type TableSession,
 } from '../types';
 import {
+  computeSplitPaymentSettlement,
+  formatDailyToken,
   formatDishNameWithVariant,
   formatMoney,
   generateInvoiceNumber,
@@ -58,6 +61,7 @@ import {
 interface BillingViewProps {
   store: StoreConfig;
   products: Product[];
+  sales?: Sale[];
   tableSessions: TableSession[];
   kotTickets?: KotTicket[];
   customers: Customer[];
@@ -138,6 +142,7 @@ function mergeSaleItems(existing: SaleItem[], additions: SaleItem[]): SaleItem[]
 export const BillingView: React.FC<BillingViewProps> = ({
   store,
   products,
+  sales = [],
   tableSessions,
   kotTickets = [],
   customers,
@@ -160,9 +165,16 @@ export const BillingView: React.FC<BillingViewProps> = ({
   const [selectedCategory, setSelectedCategory] = useState<string>('All');
   const [cart, setCart] = useState<CartItem[]>([]);
   const [taxRateInput, setTaxRateInput] = useState<string>(String(store.taxRate ?? 0));
+  const [serviceChargeRateInput, setServiceChargeRateInput] = useState<string>(
+    String(!isRetail ? store.serviceChargeRate ?? 0 : 0)
+  );
+  const [deliveryFeeInput, setDeliveryFeeInput] = useState<string>('0');
   const [discountInput, setDiscountInput] = useState<string>('0');
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('cash');
   const [amountTenderedInput, setAmountTenderedInput] = useState<string>('');
+  const [splitCashInput, setSplitCashInput] = useState<string>('');
+  const [splitCardInput, setSplitCardInput] = useState<string>('');
+  const [splitBankQrInput, setSplitBankQrInput] = useState<string>('');
   const [orderType, setOrderType] = useState<OrderType>(isRetail ? 'retail' : 'dine_in');
   const [tableNumber, setTableNumber] = useState<string>('');
   const [selectedEmployeeId, setSelectedEmployeeId] = useState<string>('');
@@ -173,6 +185,9 @@ export const BillingView: React.FC<BillingViewProps> = ({
   const [editingAddress, setEditingAddress] = useState<boolean>(false);
   const [updatingAddress, setUpdatingAddress] = useState<boolean>(false);
   const [addressSavedNotice, setAddressSavedNotice] = useState<boolean>(false);
+  const [draftTokenNumber, setDraftTokenNumber] = useState<number | null>(null);
+  const [draftKotSent, setDraftKotSent] = useState<boolean>(false);
+  const [sendKotOnTakeawayDelivery, setSendKotOnTakeawayDelivery] = useState<boolean>(true);
 
   const [editingTableOrder, setEditingTableOrder] = useState<boolean>(false);
   const [editTableItems, setEditTableItems] = useState<SaleItem[]>([]);
@@ -208,6 +223,23 @@ export const BillingView: React.FC<BillingViewProps> = ({
   useEffect(() => {
     setTaxRateInput(String(store.taxRate ?? 0));
   }, [store.id, store.taxRate]);
+
+  useEffect(() => {
+    if (isRetail) {
+      setServiceChargeRateInput('0');
+      setDeliveryFeeInput('0');
+      return;
+    }
+    if (orderType === 'dine_in') {
+      setServiceChargeRateInput(String(store.serviceChargeRate ?? 0));
+    }
+  }, [store.id, store.serviceChargeRate, isRetail, orderType]);
+
+  useEffect(() => {
+    if (!isRetail && orderType === 'delivery') {
+      setDeliveryFeeInput(String(store.defaultDeliveryFee ?? 0));
+    }
+  }, [store.id, store.defaultDeliveryFee, isRetail, orderType]);
 
   const tableSessionMap = useMemo(() => {
     const map = new Map<string, TableSession>();
@@ -314,6 +346,14 @@ export const BillingView: React.FC<BillingViewProps> = ({
     setCheckoutError(null);
     setEditingTableOrder(false);
     setEditTableItems([]);
+    setDraftTokenNumber(null);
+    setDraftKotSent(false);
+    setServiceChargeRateInput(
+      !isRetail && nextType === 'dine_in' ? String(store.serviceChargeRate ?? 0) : '0'
+    );
+    setDeliveryFeeInput(
+      !isRetail && nextType === 'delivery' ? String(store.defaultDeliveryFee ?? 0) : '0'
+    );
     if (nextType !== 'dine_in') {
       setTableNumber('');
     }
@@ -745,8 +785,20 @@ export const BillingView: React.FC<BillingViewProps> = ({
   const clearCart = (keepTable = false) => {
     setCart([]);
     setTaxRateInput(String(store.taxRate ?? 0));
+    setServiceChargeRateInput(
+      !isRetail && orderType === 'dine_in' ? String(store.serviceChargeRate ?? 0) : '0'
+    );
+    setDeliveryFeeInput(
+      !isRetail && orderType === 'delivery' ? String(store.defaultDeliveryFee ?? 0) : '0'
+    );
     setDiscountInput('0');
+    setPaymentMethod('cash');
     setAmountTenderedInput('');
+    setSplitCashInput('');
+    setSplitCardInput('');
+    setSplitBankQrInput('');
+    setDraftTokenNumber(null);
+    setDraftKotSent(false);
     setEditingTableOrder(false);
     setEditTableItems([]);
     if (!keepTable) {
@@ -900,12 +952,79 @@ export const BillingView: React.FC<BillingViewProps> = ({
     return Math.min(50, Number(val.toFixed(2)));
   }, [taxRateInput]);
 
+  const todayDateKey = getTodayDateKey();
+
+  const nextDailyToken = useMemo(() => {
+    if (isRetail) return 1;
+    let maxToken = 0;
+    for (const s of sales) {
+      if (s.dateKey === todayDateKey && typeof s.tokenNumber === 'number' && s.tokenNumber > maxToken) {
+        maxToken = s.tokenNumber;
+      }
+    }
+    for (const k of kotTickets) {
+      const created = k.createdAt?.toDate?.();
+      if (created) {
+        const kDateKey = `${created.getFullYear()}-${String(created.getMonth() + 1).padStart(
+          2,
+          '0'
+        )}-${String(created.getDate()).padStart(2, '0')}`;
+        if (kDateKey === todayDateKey && typeof k.tokenNumber === 'number' && k.tokenNumber > maxToken) {
+          maxToken = k.tokenNumber;
+        }
+      }
+    }
+    return Math.min(BLUEPRINT_LIMITS.TOKEN_NUMBER_MAX, maxToken + 1);
+  }, [isRetail, sales, kotTickets, todayDateKey]);
+
+  const activeTableToken = useMemo(() => {
+    if (!activeTableSession) return undefined;
+    const match = kotTickets.find((t) => {
+      if (t.tableNumber !== activeTableSession.tableNumber || typeof t.tokenNumber !== 'number') {
+        return false;
+      }
+      const created = t.createdAt?.toDate?.();
+      if (!created) return true;
+      const kDateKey = `${created.getFullYear()}-${String(created.getMonth() + 1).padStart(
+        2,
+        '0'
+      )}-${String(created.getDate()).padStart(2, '0')}`;
+      return kDateKey === todayDateKey;
+    });
+    return match?.tokenNumber;
+  }, [activeTableSession, kotTickets, todayDateKey]);
+
+  const activeOrderToken = !isRetail
+    ? draftTokenNumber ?? activeTableToken ?? nextDailyToken
+    : undefined;
+
+  const effectiveServiceChargeRate = useMemo(() => {
+    if (isRetail || orderType !== 'dine_in' || !serviceChargeRateInput.trim()) return 0;
+    const val = Number(serviceChargeRateInput);
+    if (!Number.isFinite(val) || val < 0) return 0;
+    return Math.min(BLUEPRINT_LIMITS.SERVICE_CHARGE_MAX, Number(val.toFixed(2)));
+  }, [isRetail, orderType, serviceChargeRateInput]);
+
+  const effectiveDeliveryFee = useMemo(() => {
+    if (isRetail || orderType !== 'delivery' || !deliveryFeeInput.trim()) return 0;
+    const val = Number(deliveryFeeInput);
+    if (!Number.isFinite(val) || val < 0) return 0;
+    return Math.min(BLUEPRINT_LIMITS.DELIVERY_FEE_MAX, Number(val.toFixed(2)));
+  }, [isRetail, orderType, deliveryFeeInput]);
+
   const taxableBase = Math.max(0, subtotal - discount);
+  const serviceChargeAmount = useMemo(
+    () => Number(((taxableBase * effectiveServiceChargeRate) / 100).toFixed(2)),
+    [taxableBase, effectiveServiceChargeRate]
+  );
   const taxAmount = useMemo(
     () => Number(((taxableBase * effectiveTaxRate) / 100).toFixed(2)),
     [taxableBase, effectiveTaxRate]
   );
-  const grandTotal = useMemo(() => Number((taxableBase + taxAmount).toFixed(2)), [taxableBase, taxAmount]);
+  const grandTotal = useMemo(
+    () => Number((taxableBase + serviceChargeAmount + effectiveDeliveryFee + taxAmount).toFixed(2)),
+    [taxableBase, serviceChargeAmount, effectiveDeliveryFee, taxAmount]
+  );
   const totalItemsCount = useMemo(
     () => combinedItems.reduce((acc, i) => acc + i.quantity, 0),
     [combinedItems]
@@ -926,6 +1045,17 @@ export const BillingView: React.FC<BillingViewProps> = ({
     if (!Number.isFinite(val) || val >= grandTotal) return 0;
     return Number((grandTotal - val).toFixed(2));
   }, [paymentMethod, amountTenderedInput, grandTotal]);
+
+  const splitMetrics = useMemo(
+    () =>
+      computeSplitPaymentSettlement({
+        grandTotal,
+        cashHandedInput: splitCashInput,
+        cardInput: splitCardInput,
+        bankQrInput: splitBankQrInput,
+      }),
+    [grandTotal, splitCashInput, splitCardInput, splitBankQrInput]
+  );
 
   const quickCashSuggestions = useMemo(() => {
     if (grandTotal <= 0) return [];
@@ -960,11 +1090,15 @@ export const BillingView: React.FC<BillingViewProps> = ({
       itemCount: totalItemsCount,
       subtotal: Number(subtotal.toFixed(2)),
       discount: Number(discount.toFixed(2)),
+      serviceChargeRate: effectiveServiceChargeRate,
+      serviceChargeAmount,
+      deliveryFee: effectiveDeliveryFee,
       taxRate: effectiveTaxRate,
       taxAmount,
       total: grandTotal,
       totalCost: Number(totalCost.toFixed(2)),
-      profit: Number((grandTotal - totalCost).toFixed(2)),
+      profit: Number((grandTotal - taxAmount - totalCost).toFixed(2)),
+      ...(activeOrderToken ? { tokenNumber: activeOrderToken } : {}),
       paymentMethod: 'cash',
       amountTendered: 0,
       changeDue: 0,
@@ -1101,11 +1235,13 @@ export const BillingView: React.FC<BillingViewProps> = ({
       const kotId = generateSafeId('kot');
       const ticketNumber = `KOT-T${tableNumber}-${String(Date.now()).slice(-4)}`;
       const kotItemCount = cartSaleItems.reduce((a, i) => a + i.quantity, 0);
+      const tokenForTable = activeTableToken ?? nextDailyToken;
 
       batch.set(doc(db, 'stores', store.id, 'kotQueue', kotId), {
         ownerId,
         storeId: store.id,
         ticketNumber,
+        tokenNumber: tokenForTable,
         tableNumber,
         orderType: 'dine_in',
         ticketKind: isAddOn ? 'addon' : 'new',
@@ -1138,6 +1274,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
         total: cartSaleItems.reduce((a, i) => a + i.lineTotal, 0),
         totalCost: 0,
         profit: 0,
+        tokenNumber: tokenForTable,
         paymentMethod: 'cash',
         amountTendered: 0,
         changeDue: 0,
@@ -1156,11 +1293,115 @@ export const BillingView: React.FC<BillingViewProps> = ({
       showTempNotice(
         isAddOn
           ? `Add-on added to Table ${tableNumber} — ready to print Add-On KOT.`
-          : `Table ${tableNumber} is now Occupied — KOT generated.`
+          : `Table ${tableNumber} is now Occupied — KOT (${formatDailyToken(tokenForTable)}) generated.`
       );
       onPrintJob({ type: 'kot', sale: kotSalePreview, isAddOn, kotId });
     } catch (err) {
       handleFirestoreError(err, isAddOn ? OperationType.UPDATE : OperationType.CREATE, tablePath);
+    } finally {
+      setProcessing(false);
+    }
+  };
+
+  /**
+   * Send a Takeaway or Delivery Kitchen KOT before collecting final payment (reserves today's Token #)
+   */
+  const handleSendTakeawayDeliveryKot = async () => {
+    if (isRetail || (orderType !== 'takeaway' && orderType !== 'delivery')) return;
+    if (cartSaleItems.length === 0) {
+      setCheckoutError('Add at least one dish to send a Kitchen KOT.');
+      return;
+    }
+    if (cartSaleItems.length > BLUEPRINT_LIMITS.SALE_ITEMS_MAX) {
+      setCheckoutError(`Maximum ${BLUEPRINT_LIMITS.SALE_ITEMS_MAX} distinct items per KOT.`);
+      return;
+    }
+
+    setProcessing(true);
+    setCheckoutError(null);
+
+    const tokenToUse = draftTokenNumber ?? nextDailyToken;
+    const kotId = generateSafeId('kot');
+    const prefix = orderType === 'delivery' ? 'DLV' : 'TKW';
+    const ticketNumber = `KOT-${prefix}-${String(tokenToUse).padStart(2, '0')}-${String(
+      Date.now()
+    ).slice(-3)}`;
+    const kotItemCount = cartSaleItems.reduce((a, i) => a + i.quantity, 0);
+    const cleanGuest =
+      customerName.trim().slice(0, BLUEPRINT_LIMITS.CUSTOMER_NAME_MAX) ||
+      (orderType === 'delivery' ? 'Delivery Guest' : 'Takeaway Guest');
+    const finalEmpId = resolvedEmployeeId.slice(0, 128);
+    const finalEmpName = resolvedEmployeeName.slice(0, BLUEPRINT_LIMITS.EMPLOYEE_NAME_MAX);
+    const kotPath = `stores/${store.id}/kotQueue/${kotId}`;
+
+    try {
+      const batch = writeBatch(db);
+      batch.set(doc(db, 'stores', store.id, 'kotQueue', kotId), {
+        ownerId,
+        storeId: store.id,
+        ticketNumber,
+        tokenNumber: tokenToUse,
+        tableNumber: '',
+        orderType,
+        ticketKind: draftKotSent ? 'addon' : 'new',
+        items: cartSaleItems,
+        itemCount: kotItemCount,
+        customerName: cleanGuest,
+        employeeId: finalEmpId,
+        employeeName: finalEmpName,
+        source: 'counter',
+        status: 'printed',
+        kitchenStatus: 'preparing',
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+      await batch.commit();
+
+      const kotPreview: Sale = {
+        id: kotId,
+        ownerId,
+        storeId: store.id,
+        invoiceNumber: ticketNumber,
+        dateKey: getTodayDateKey(),
+        items: cartSaleItems,
+        itemCount: kotItemCount,
+        subtotal: cartSaleItems.reduce((a, i) => a + i.lineTotal, 0),
+        discount: 0,
+        taxRate: 0,
+        taxAmount: 0,
+        total: cartSaleItems.reduce((a, i) => a + i.lineTotal, 0),
+        totalCost: 0,
+        profit: 0,
+        tokenNumber: tokenToUse,
+        paymentMethod: 'cash',
+        amountTendered: 0,
+        changeDue: 0,
+        orderType,
+        tableNumber: '',
+        customerName: cleanGuest,
+        employeeId: finalEmpId,
+        employeeName: finalEmpName,
+        status: 'completed',
+        createdAt: null,
+        updatedAt: null,
+      };
+
+      setDraftTokenNumber(tokenToUse);
+      setDraftKotSent(true);
+      showTempNotice(
+        `Kitchen KOT sent for ${
+          orderType === 'delivery' ? 'Delivery' : 'Takeaway'
+        } (${formatDailyToken(tokenToUse)})!`
+      );
+      onPrintJob({ type: 'kot', sale: kotPreview, isAddOn: draftKotSent, kotId });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Unable to send Kitchen KOT.';
+      setCheckoutError(`KOT failed: ${msg}`);
+      try {
+        handleFirestoreError(err, OperationType.CREATE, kotPath);
+      } catch {
+        // Logged & shown
+      }
     } finally {
       setProcessing(false);
     }
@@ -1690,6 +1931,28 @@ export const BillingView: React.FC<BillingViewProps> = ({
       return;
     }
 
+    if (paymentMethod === 'split') {
+      if (splitMetrics.nonCashExceedsTotal) {
+        setCheckoutError('Card + Bank/QR total cannot exceed the grand total.');
+        return;
+      }
+      if (splitMetrics.remainingToPay > 0) {
+        setCheckoutError(
+          `Split payments total is short by ${formatMoney(
+            splitMetrics.remainingToPay,
+            store.currency
+          )}.`
+        );
+        return;
+      }
+      if (grandTotal > 0 && splitMetrics.activeMethodsCount < 2) {
+        setCheckoutError(
+          'Enter amounts for at least 2 payment methods (e.g. Cash + Card) for Split Payment.'
+        );
+        return;
+      }
+    }
+
     setProcessing(true);
     setCheckoutError(null);
 
@@ -1703,6 +1966,15 @@ export const BillingView: React.FC<BillingViewProps> = ({
       0,
       BLUEPRINT_LIMITS.EMPLOYEE_NAME_MAX
     );
+    const assignedToken = !isRetail ? (draftTokenNumber ?? activeTableToken ?? nextDailyToken) : undefined;
+    const shouldCreateTakeawayDeliveryKot =
+      !isRetail &&
+      (effectiveOrderType === 'takeaway' || effectiveOrderType === 'delivery') &&
+      sendKotOnTakeawayDelivery &&
+      !draftKotSent;
+    const finalAmountTendered =
+      paymentMethod === 'split' ? splitMetrics.tenderedTotal : Number(parsedTendered.toFixed(2));
+    const finalChangeDue = paymentMethod === 'split' ? splitMetrics.changeDue : changeDue;
 
     try {
       const batch = writeBatch(db);
@@ -1717,14 +1989,23 @@ export const BillingView: React.FC<BillingViewProps> = ({
         itemCount: totalItemsCount,
         subtotal: Number(subtotal.toFixed(2)),
         discount: Number(discount.toFixed(2)),
+        ...(effectiveServiceChargeRate > 0 || serviceChargeAmount > 0
+          ? {
+              serviceChargeRate: effectiveServiceChargeRate,
+              serviceChargeAmount,
+            }
+          : {}),
+        ...(effectiveDeliveryFee > 0 ? { deliveryFee: effectiveDeliveryFee } : {}),
         taxRate: effectiveTaxRate,
         taxAmount,
         total: grandTotal,
         totalCost: Number(totalCost.toFixed(2)),
         profit: netProfit,
+        ...(assignedToken ? { tokenNumber: assignedToken } : {}),
         paymentMethod,
-        amountTendered: Number(parsedTendered.toFixed(2)),
-        changeDue,
+        ...(paymentMethod === 'split' ? { paymentSplit: splitMetrics.paymentSplit } : {}),
+        amountTendered: finalAmountTendered,
+        changeDue: finalChangeDue,
         orderType: effectiveOrderType,
         tableNumber:
           !isRetail && effectiveOrderType === 'dine_in'
@@ -1739,6 +2020,34 @@ export const BillingView: React.FC<BillingViewProps> = ({
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
+
+      if (shouldCreateTakeawayDeliveryKot) {
+        const kotId = generateSafeId('kot');
+        const prefix = effectiveOrderType === 'delivery' ? 'DLV' : 'TKW';
+        const ticketNumber = `KOT-${prefix}-${String(assignedToken ?? nextDailyToken).padStart(
+          2,
+          '0'
+        )}-${String(Date.now()).slice(-3)}`;
+        batch.set(doc(db, 'stores', store.id, 'kotQueue', kotId), {
+          ownerId,
+          storeId: store.id,
+          ticketNumber,
+          ...(assignedToken ? { tokenNumber: assignedToken } : {}),
+          tableNumber: '',
+          orderType: effectiveOrderType,
+          ticketKind: 'new',
+          items: combinedItems,
+          itemCount: totalItemsCount,
+          customerName: cleanName,
+          employeeId: finalEmpId,
+          employeeName: finalEmpName,
+          source: 'counter',
+          status: 'printed',
+          kitchenStatus: 'preparing',
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      }
 
       // Deduct stock ONLY for items currently in the unsaved cart that track stock (grouped by productId)
       const trackedCartByProduct = new Map<string, { product: Product; quantity: number }>();
@@ -1836,14 +2145,19 @@ export const BillingView: React.FC<BillingViewProps> = ({
         itemCount: totalItemsCount,
         subtotal: Number(subtotal.toFixed(2)),
         discount: Number(discount.toFixed(2)),
+        serviceChargeRate: effectiveServiceChargeRate,
+        serviceChargeAmount,
+        deliveryFee: effectiveDeliveryFee,
         taxRate: effectiveTaxRate,
         taxAmount,
         total: grandTotal,
         totalCost: Number(totalCost.toFixed(2)),
         profit: netProfit,
+        ...(assignedToken ? { tokenNumber: assignedToken } : {}),
         paymentMethod,
-        amountTendered: Number(parsedTendered.toFixed(2)),
-        changeDue,
+        ...(paymentMethod === 'split' ? { paymentSplit: splitMetrics.paymentSplit } : {}),
+        amountTendered: finalAmountTendered,
+        changeDue: finalChangeDue,
         orderType: effectiveOrderType,
         tableNumber: !isRetail && effectiveOrderType === 'dine_in' ? tableNumber.trim() : '',
         customerName: cleanName,
@@ -1865,7 +2179,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
         showTempNotice(
           activeTableSession
             ? `Table ${activeTableSession.tableNumber} settled and cleared to Empty.`
-            : `Bill ${invoiceNumber} saved.`
+            : `Bill ${invoiceNumber}${assignedToken ? ` (Token ${formatDailyToken(assignedToken)})` : ''} saved.`
         );
       }
     } catch (err) {
@@ -1879,9 +2193,21 @@ export const BillingView: React.FC<BillingViewProps> = ({
     <div className="flex flex-col h-full max-h-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl overflow-y-auto">
       <div className="flex items-center justify-between px-4 py-3 border-b border-slate-200 dark:border-slate-800 shrink-0">
         <div>
-          <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-            {activeTableSession ? `Table ${activeTableSession.tableNumber} · Occupied` : 'Current Bill'}
-          </h2>
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+              {activeTableSession ? `Table ${activeTableSession.tableNumber} · Occupied` : 'Current Bill'}
+            </h2>
+            {!isRetail && activeOrderToken && (
+              <span className="rounded bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 text-[10px] font-bold font-mono px-1.5 py-0.5">
+                Token {formatDailyToken(activeOrderToken)}
+              </span>
+            )}
+            {!isRetail && draftKotSent && (
+              <span className="rounded bg-emerald-100 dark:bg-emerald-950/70 text-emerald-800 dark:text-emerald-300 text-[10px] font-semibold px-1.5 py-0.5">
+                KOT Sent
+              </span>
+            )}
+          </div>
           <p className="text-xs text-slate-500 dark:text-slate-400 font-mono tabular-nums">
             {totalItemsCount} {totalItemsCount === 1 ? 'item' : 'items'}
             {activeTableSession && cart.length > 0 ? ` (${cart.length} new add-on)` : ''}
@@ -2605,6 +2931,100 @@ export const BillingView: React.FC<BillingViewProps> = ({
                 <span className="font-mono tabular-nums">{formatMoney(subtotal, store.currency)}</span>
               </div>
 
+              {/* Dine-In Service Charge (%) — pre-fills store default or allows manual override */}
+              {!isRetail && orderType === 'dine_in' && (
+                <div className="flex items-center justify-between gap-2 text-slate-600 dark:text-slate-400">
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <label htmlFor="pos-service-charge-input" className="whitespace-nowrap">
+                      Service (%)
+                    </label>
+                    {effectiveServiceChargeRate !== 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setServiceChargeRateInput('0')}
+                        className="text-[10px] font-medium text-slate-500 hover:text-red-600 dark:hover:text-red-400 underline cursor-pointer"
+                      >
+                        0%
+                      </button>
+                    )}
+                    {(store.serviceChargeRate ?? 0) > 0 &&
+                      effectiveServiceChargeRate !== (store.serviceChargeRate ?? 0) && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setServiceChargeRateInput(String(store.serviceChargeRate ?? 0))
+                          }
+                          className="text-[10px] font-medium brand-text hover:underline whitespace-nowrap cursor-pointer"
+                        >
+                          Default ({store.serviceChargeRate}%)
+                        </button>
+                      )}
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <div className="relative flex items-center">
+                      <input
+                        id="pos-service-charge-input"
+                        type="number"
+                        min="0"
+                        max={BLUEPRINT_LIMITS.SERVICE_CHARGE_MAX}
+                        step="any"
+                        value={serviceChargeRateInput}
+                        onChange={(e) => setServiceChargeRateInput(e.target.value)}
+                        placeholder="0"
+                        className="w-16 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 pl-2 pr-5 py-1 text-right font-mono tabular-nums text-xs text-slate-900 dark:text-slate-100"
+                      />
+                      <span className="absolute right-1.5 text-[10px] text-slate-400 pointer-events-none">
+                        %
+                      </span>
+                    </div>
+                    <span className="min-w-[68px] text-right font-mono tabular-nums text-slate-700 dark:text-slate-300">
+                      {formatMoney(serviceChargeAmount, store.currency)}
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              {/* Delivery Fee — pre-fills store default or allows manual override */}
+              {!isRetail && orderType === 'delivery' && (
+                <div className="flex items-center justify-between gap-2 text-slate-600 dark:text-slate-400">
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <label htmlFor="pos-delivery-fee-input" className="whitespace-nowrap">
+                      Delivery Fee ({store.currency})
+                    </label>
+                    {effectiveDeliveryFee !== 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setDeliveryFeeInput('0')}
+                        className="text-[10px] font-medium text-slate-500 hover:text-red-600 dark:hover:text-red-400 underline cursor-pointer"
+                      >
+                        Free
+                      </button>
+                    )}
+                    {(store.defaultDeliveryFee ?? 0) > 0 &&
+                      effectiveDeliveryFee !== (store.defaultDeliveryFee ?? 0) && (
+                        <button
+                          type="button"
+                          onClick={() => setDeliveryFeeInput(String(store.defaultDeliveryFee ?? 0))}
+                          className="text-[10px] font-medium brand-text hover:underline whitespace-nowrap cursor-pointer"
+                        >
+                          Default ({store.defaultDeliveryFee})
+                        </button>
+                      )}
+                  </div>
+                  <input
+                    id="pos-delivery-fee-input"
+                    type="number"
+                    min="0"
+                    max={BLUEPRINT_LIMITS.DELIVERY_FEE_MAX}
+                    step="any"
+                    value={deliveryFeeInput}
+                    onChange={(e) => setDeliveryFeeInput(e.target.value)}
+                    placeholder="0"
+                    className="w-24 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-1 text-right font-mono tabular-nums text-xs text-slate-900 dark:text-slate-100"
+                  />
+                </div>
+              )}
+
               {/* Tax (%) right after Subtotal: pre-fills store default or allows manual override / 0% */}
               <div className="flex items-center justify-between gap-2 text-slate-600 dark:text-slate-400">
                 <div className="flex items-center gap-1.5 min-w-0">
@@ -2675,12 +3095,13 @@ export const BillingView: React.FC<BillingViewProps> = ({
             </div>
 
             {/* Payment Method Selector */}
-            <div className="grid grid-cols-3 gap-1.5">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
               {(
                 [
                   { id: 'cash', label: 'Cash', icon: Banknote },
                   { id: 'card', label: 'Card', icon: CreditCard },
                   { id: 'bank_qr', label: 'Bank/QR', icon: QrCode },
+                  { id: 'split', label: 'Split', icon: Wallet },
                 ] as const
               ).map(({ id, label, icon: Icon }) => (
                 <button
@@ -2779,6 +3200,129 @@ export const BillingView: React.FC<BillingViewProps> = ({
                 )}
               </div>
             )}
+
+            {/* Split Payment Breakdown Inputs */}
+            {paymentMethod === 'split' && (
+              <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-2.5 space-y-2 text-xs">
+                <div className="flex items-center justify-between">
+                  <span className="font-semibold text-slate-700 dark:text-slate-200">
+                    Split Bill ({formatMoney(grandTotal, store.currency)})
+                  </span>
+                  {(splitCashInput || splitCardInput || splitBankQrInput) && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSplitCashInput('');
+                        setSplitCardInput('');
+                        setSplitBankQrInput('');
+                        setCheckoutError(null);
+                      }}
+                      className="text-[10px] text-slate-400 hover:text-red-600 dark:hover:text-red-400 cursor-pointer"
+                    >
+                      Clear Split
+                    </button>
+                  )}
+                </div>
+
+                {(
+                  [
+                    {
+                      id: 'split-cash-input',
+                      label: 'Cash',
+                      value: splitCashInput,
+                      setter: setSplitCashInput,
+                      otherSum: splitMetrics.cardAmount + splitMetrics.bankQrAmount,
+                    },
+                    {
+                      id: 'split-card-input',
+                      label: 'Card',
+                      value: splitCardInput,
+                      setter: setSplitCardInput,
+                      otherSum: splitMetrics.cashHanded + splitMetrics.bankQrAmount,
+                    },
+                    {
+                      id: 'split-qr-input',
+                      label: 'Bank / QR',
+                      value: splitBankQrInput,
+                      setter: setSplitBankQrInput,
+                      otherSum: splitMetrics.cashHanded + splitMetrics.cardAmount,
+                    },
+                  ] as const
+                ).map((row) => {
+                  const restForField = Math.max(0, Number((grandTotal - row.otherSum).toFixed(2)));
+                  return (
+                    <div key={row.id} className="flex items-center justify-between gap-2">
+                      <label
+                        htmlFor={row.id}
+                        className="font-medium text-slate-700 dark:text-slate-300 whitespace-nowrap"
+                      >
+                        {row.label}
+                      </label>
+                      <div className="flex items-center gap-1.5">
+                        {restForField > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              row.setter(String(restForField));
+                              setCheckoutError(null);
+                            }}
+                            className="rounded border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-1.5 py-1 text-[10px] font-semibold text-slate-600 dark:text-slate-300 hover:border-slate-400 cursor-pointer whitespace-nowrap"
+                            title={`Fill remaining ${formatMoney(restForField, store.currency)}`}
+                          >
+                            Fill Rest
+                          </button>
+                        )}
+                        <input
+                          id={row.id}
+                          type="number"
+                          min="0"
+                          step="any"
+                          value={row.value}
+                          onChange={(e) => {
+                            row.setter(e.target.value);
+                            setCheckoutError(null);
+                          }}
+                          placeholder="0.00"
+                          className="w-24 rounded-md border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-2 py-1 text-right font-mono font-semibold tabular-nums text-xs text-slate-900 dark:text-slate-100"
+                        />
+                      </div>
+                    </div>
+                  );
+                })}
+
+                {grandTotal > 0 && (
+                  splitMetrics.nonCashExceedsTotal ? (
+                    <div className="flex items-center justify-between pt-1.5 border-t border-slate-100 dark:border-slate-800 text-xs font-semibold text-red-600 dark:text-red-400">
+                      <span>Card + Bank/QR exceeds bill total</span>
+                      <span className="font-mono tabular-nums">
+                        {formatMoney(splitMetrics.nonCashTotal, store.currency)}
+                      </span>
+                    </div>
+                  ) : splitMetrics.remainingToPay > 0 ? (
+                    <div className="flex items-center justify-between pt-1.5 border-t border-slate-100 dark:border-slate-800 text-xs font-semibold text-amber-700 dark:text-amber-400">
+                      <span>Remaining to Allocate</span>
+                      <span className="font-mono tabular-nums">
+                        {formatMoney(splitMetrics.remainingToPay, store.currency)}
+                      </span>
+                    </div>
+                  ) : splitMetrics.changeDue > 0 ? (
+                    <div className="flex items-center justify-between pt-1.5 border-t border-slate-100 dark:border-slate-800 text-xs font-semibold text-emerald-700 dark:text-emerald-400">
+                      <span>Change / Return (Cash)</span>
+                      <span className="font-mono tabular-nums">
+                        {formatMoney(splitMetrics.changeDue, store.currency)}
+                      </span>
+                    </div>
+                  ) : (
+                    <div className="flex items-center justify-between pt-1.5 border-t border-slate-100 dark:border-slate-800 text-xs font-semibold text-emerald-700 dark:text-emerald-400">
+                      <span>Split Matched</span>
+                      <span className="font-mono tabular-nums">
+                        {formatMoney(grandTotal, store.currency)}
+                      </span>
+                    </div>
+                  )
+                )}
+              </div>
+            )}
           </>
         )}
 
@@ -2871,6 +3415,36 @@ export const BillingView: React.FC<BillingViewProps> = ({
                       : `Book Table ${tableNumber} & Print KOT`}
                   </span>
                 </button>
+              )}
+
+              {/* Takeaway / Delivery Kitchen KOT Option */}
+              {!isRetail && (orderType === 'takeaway' || orderType === 'delivery') && cart.length > 0 && (
+                <div className="space-y-1.5">
+                  <button
+                    type="button"
+                    disabled={processing}
+                    onClick={() => void handleSendTakeawayDeliveryKot()}
+                    className="w-full flex items-center justify-center gap-2 rounded-lg border border-amber-600 dark:border-amber-500 bg-amber-50 dark:bg-amber-950/40 px-4 py-2.5 text-xs font-semibold text-amber-800 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-950/70 disabled:opacity-45 transition-colors cursor-pointer"
+                  >
+                    <ChefHat className="w-3.5 h-3.5 shrink-0" />
+                    <span>
+                      {draftKotSent
+                        ? `Send Extra Kitchen KOT (${formatDailyToken(activeOrderToken)})`
+                        : `Send Kitchen KOT (${formatDailyToken(activeOrderToken)})`}
+                    </span>
+                  </button>
+                  {!draftKotSent && (
+                    <label className="flex items-center gap-2 px-1 text-[11px] text-slate-600 dark:text-slate-400 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={sendKotOnTakeawayDelivery}
+                        onChange={(e) => setSendKotOnTakeawayDelivery(e.target.checked)}
+                        className="rounded border-slate-300 dark:border-slate-700"
+                      />
+                      <span>Also send to Kitchen Display / KOT on bill completion</span>
+                    </label>
+                  )}
+                </div>
               )}
 
               {/* Pre-Payment Print Bill Only (Keeps Table Open / Does Not Settle Payment) */}

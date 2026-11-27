@@ -13,9 +13,12 @@ import {
 } from '../types';
 import {
   exportSalesLedgerCSV,
+  formatDailyToken,
   formatDateTime,
   formatMoney,
+  formatSalePaymentLabel,
   generateSafeId,
+  getSaleTenderBreakdown,
   getTodayDateKey,
   isProductStockTracked,
 } from '../utils/posHelpers';
@@ -205,6 +208,7 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
               <option value="cash">Cash</option>
               <option value="card">Card</option>
               <option value="bank_qr">Bank / QR</option>
+              <option value="split">Split (Mix)</option>
             </select>
 
             {employeeFilterOptions.length > 0 && (
@@ -286,6 +290,11 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
                       ) : (
                         <div>
                           <span className="capitalize">{sale.orderType.replace('_', ' ')}</span>
+                          {formatDailyToken(sale.tokenNumber) && (
+                            <span className="ml-1.5 inline-block rounded bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 text-[10px] font-mono font-bold text-slate-800 dark:text-slate-200">
+                              {formatDailyToken(sale.tokenNumber)}
+                            </span>
+                          )}
                           {sale.tableNumber ? ` · T-${sale.tableNumber}` : ''}
                           {sale.customerName ? ` · ${sale.customerName}` : ''}
                           {sale.customerPhone && (
@@ -299,8 +308,19 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
                     <td className="py-3 px-4 text-slate-700 dark:text-slate-300 font-medium whitespace-nowrap">
                       {sale.employeeName || <span className="text-slate-400 font-normal">—</span>}
                     </td>
-                    <td className="py-3 px-4 uppercase font-mono text-slate-600 dark:text-slate-300">
-                      {sale.paymentMethod.replace('_', '/')}
+                    <td className="py-3 px-4 font-mono text-slate-600 dark:text-slate-300">
+                      {sale.paymentMethod === 'split' ? (
+                        <div>
+                          <span className="inline-block rounded bg-indigo-50 dark:bg-indigo-950/60 border border-indigo-200 dark:border-indigo-800 px-1.5 py-0.5 text-[10px] font-bold text-indigo-700 dark:text-indigo-300">
+                            SPLIT
+                          </span>
+                          <div className="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5">
+                            {formatSalePaymentLabel(sale, store.currency).replace(/^SPLIT\s*/, '')}
+                          </div>
+                        </div>
+                      ) : (
+                        <span className="uppercase">{sale.paymentMethod.replace('_', '/')}</span>
+                      )}
                     </td>
                     <td className="py-3 px-4">
                       <span
@@ -385,6 +405,14 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
                     </strong>
                   </div>
                 )}
+                {formatDailyToken(selectedSale.tokenNumber) && (
+                  <div>
+                    <span className="text-slate-500">Daily Token:</span>{' '}
+                    <strong className="font-mono text-slate-900 dark:text-slate-100">
+                      {formatDailyToken(selectedSale.tokenNumber)}
+                    </strong>
+                  </div>
+                )}
                 {selectedSale.tableNumber && (
                   <div>
                     <span className="text-slate-500">Table:</span> Table {selectedSale.tableNumber}
@@ -438,12 +466,6 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
                   {formatMoney(selectedSale.subtotal, store.currency)}
                 </span>
               </div>
-              <div className="flex justify-between text-slate-600 dark:text-slate-400">
-                <span>Tax ({selectedSale.taxRate ?? 0}%)</span>
-                <span className="font-mono tabular-nums">
-                  {formatMoney(selectedSale.taxAmount ?? 0, store.currency)}
-                </span>
-              </div>
               {selectedSale.discount > 0 && (
                 <div className="flex justify-between text-slate-600 dark:text-slate-400">
                   <span>Discount</span>
@@ -452,13 +474,80 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
                   </span>
                 </div>
               )}
+              {(selectedSale.serviceChargeAmount ?? 0) > 0 && (
+                <div className="flex justify-between text-slate-600 dark:text-slate-400">
+                  <span>Service Charge ({selectedSale.serviceChargeRate ?? 0}%)</span>
+                  <span className="font-mono tabular-nums">
+                    {formatMoney(selectedSale.serviceChargeAmount ?? 0, store.currency)}
+                  </span>
+                </div>
+              )}
+              {(selectedSale.deliveryFee ?? 0) > 0 && (
+                <div className="flex justify-between text-slate-600 dark:text-slate-400">
+                  <span>Delivery Fee</span>
+                  <span className="font-mono tabular-nums">
+                    {formatMoney(selectedSale.deliveryFee ?? 0, store.currency)}
+                  </span>
+                </div>
+              )}
+              <div className="flex justify-between text-slate-600 dark:text-slate-400">
+                <span>Tax ({selectedSale.taxRate ?? 0}%)</span>
+                <span className="font-mono tabular-nums">
+                  {formatMoney(selectedSale.taxAmount ?? 0, store.currency)}
+                </span>
+              </div>
               <div className="flex justify-between pt-2 border-t border-slate-200 dark:border-slate-800 text-sm font-bold text-slate-900 dark:text-slate-100">
                 <span>Grand Total</span>
                 <span className="font-mono tabular-nums">
                   {formatMoney(selectedSale.total, store.currency)}
                 </span>
               </div>
-              {selectedSale.paymentMethod === 'cash' && (
+              {selectedSale.paymentMethod === 'split' && selectedSale.paymentSplit ? (
+                (() => {
+                  const split = getSaleTenderBreakdown(selectedSale);
+                  return (
+                    <div className="pt-1.5 space-y-1 border-t border-dashed border-slate-200 dark:border-slate-800">
+                      <div className="font-semibold text-slate-800 dark:text-slate-200">
+                        Split Payment Breakdown
+                      </div>
+                      {split.cash > 0 && (
+                        <>
+                          <div className="flex justify-between text-slate-600 dark:text-slate-400">
+                            <span>{(selectedSale.changeDue ?? 0) > 0 ? 'Cash Applied' : 'Cash'}</span>
+                            <span className="font-mono tabular-nums">
+                              {formatMoney(split.cash, store.currency)}
+                            </span>
+                          </div>
+                          {(selectedSale.changeDue ?? 0) > 0 && (
+                            <div className="flex justify-between font-semibold text-emerald-700 dark:text-emerald-400">
+                              <span>Change / Return</span>
+                              <span className="font-mono tabular-nums">
+                                {formatMoney(selectedSale.changeDue ?? 0, store.currency)}
+                              </span>
+                            </div>
+                          )}
+                        </>
+                      )}
+                      {split.card > 0 && (
+                        <div className="flex justify-between text-slate-600 dark:text-slate-400">
+                          <span>Card</span>
+                          <span className="font-mono tabular-nums">
+                            {formatMoney(split.card, store.currency)}
+                          </span>
+                        </div>
+                      )}
+                      {split.bank_qr > 0 && (
+                        <div className="flex justify-between text-slate-600 dark:text-slate-400">
+                          <span>Bank / QR</span>
+                          <span className="font-mono tabular-nums">
+                            {formatMoney(split.bank_qr, store.currency)}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()
+              ) : selectedSale.paymentMethod === 'cash' ? (
                 <div className="pt-1.5 space-y-1 border-t border-dashed border-slate-200 dark:border-slate-800">
                   <div className="flex justify-between text-slate-600 dark:text-slate-400">
                     <span>Cash Received</span>
@@ -472,6 +561,13 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
                       {formatMoney(selectedSale.changeDue ?? 0, store.currency)}
                     </span>
                   </div>
+                </div>
+              ) : (
+                <div className="pt-1.5 flex justify-between border-t border-dashed border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400">
+                  <span>Payment Method</span>
+                  <span className="font-mono uppercase">
+                    {selectedSale.paymentMethod.replace('_', '/')}
+                  </span>
                 </div>
               )}
             </div>

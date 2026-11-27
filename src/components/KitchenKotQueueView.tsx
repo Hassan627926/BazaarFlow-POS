@@ -18,7 +18,7 @@ import {
   Zap,
 } from 'lucide-react';
 import type { KotKitchenStatus, KotTicket, StoreConfig } from '../types';
-import { formatDateTime } from '../utils/posHelpers';
+import { formatDailyToken, formatDateTime } from '../utils/posHelpers';
 
 interface KitchenKotQueueViewProps {
   store: StoreConfig;
@@ -460,8 +460,19 @@ export const KitchenKotQueueView: React.FC<KitchenKotQueueViewProps> = ({
                       <div>
                         <div className="flex flex-wrap items-center gap-1.5">
                           <span className="text-base font-bold font-display text-slate-900 dark:text-slate-100">
-                            {ticket.tableNumber ? `Table ${ticket.tableNumber}` : 'Counter Order'}
+                            {ticket.tableNumber
+                              ? `Table ${ticket.tableNumber}`
+                              : ticket.orderType === 'delivery'
+                              ? 'Delivery'
+                              : ticket.orderType === 'takeaway'
+                              ? 'Takeaway'
+                              : 'Counter Order'}
                           </span>
+                          {formatDailyToken(ticket.tokenNumber) && (
+                            <span className="text-[11px] font-bold font-mono px-2 py-0.5 rounded border border-slate-300 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 text-slate-900 dark:text-slate-100">
+                              Token {formatDailyToken(ticket.tokenNumber)}
+                            </span>
+                          )}
                           <span
                             className={`text-[10px] font-bold px-2 py-0.5 rounded border ${badge.className}`}
                           >
@@ -666,7 +677,16 @@ export const KitchenKotQueueView: React.FC<KitchenKotQueueViewProps> = ({
                   >
                     <td className="py-2.5 px-4">
                       <div className="font-semibold text-slate-900 dark:text-slate-100">
-                        {ticket.tableNumber ? `Table ${ticket.tableNumber}` : 'Counter'}
+                        {ticket.tableNumber
+                          ? `Table ${ticket.tableNumber}`
+                          : ticket.orderType === 'delivery'
+                          ? 'Delivery'
+                          : ticket.orderType === 'takeaway'
+                          ? 'Takeaway'
+                          : 'Counter'}
+                        {formatDailyToken(ticket.tokenNumber)
+                          ? ` · Token ${formatDailyToken(ticket.tokenNumber)}`
+                          : ''}
                       </div>
                       <div className="text-[11px] font-mono text-slate-400">
                         {ticket.ticketNumber} · {KIND_LABELS[ticket.ticketKind].label}

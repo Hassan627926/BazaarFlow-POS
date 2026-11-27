@@ -1,6 +1,11 @@
 import { jsPDF } from 'jspdf';
 import type { Sale, StoreConfig } from '../types';
-import { formatDateTime, formatMoney } from './posHelpers';
+import {
+  formatDailyToken,
+  formatDateTime,
+  formatMoney,
+  getSaleTenderBreakdown,
+} from './posHelpers';
 
 function loadImageDimensions(
   dataUrl: string
@@ -147,6 +152,10 @@ function renderReceiptIntoDoc(
   drawKeyValue('Date', formatDateTime(sale.createdAt));
 
   if (store.businessType === 'restaurant') {
+    const tokenLabel = formatDailyToken(sale.tokenNumber);
+    if (tokenLabel) {
+      drawKeyValue('Daily Token', tokenLabel, true, baseFont);
+    }
     const orderText = `${sale.orderType.replace('_', ' ').toUpperCase()}${
       sale.tableNumber ? ` · T-${sale.tableNumber}` : ''
     }`;
@@ -238,16 +247,10 @@ function renderReceiptIntoDoc(
 
   drawDashedDivider();
 
-  // Totals Breakdown (Subtotal -> Tax (always shown, 0% if none) -> Discount -> Grand Total)
+  // Totals Breakdown (Subtotal -> Discount -> Service Charge -> Delivery Fee -> Tax -> Grand Total)
   drawKeyValue(
     `Subtotal (${sale.itemCount} items)`,
     formatMoney(sale.subtotal, store.currency),
-    false,
-    baseFont
-  );
-  drawKeyValue(
-    `Tax (${sale.taxRate ?? 0}%)`,
-    formatMoney(sale.taxAmount ?? 0, store.currency),
     false,
     baseFont
   );
@@ -259,6 +262,28 @@ function renderReceiptIntoDoc(
       baseFont
     );
   }
+  if ((sale.serviceChargeAmount ?? 0) > 0) {
+    drawKeyValue(
+      `Service Charge (${sale.serviceChargeRate ?? 0}%)`,
+      formatMoney(sale.serviceChargeAmount ?? 0, store.currency),
+      false,
+      baseFont
+    );
+  }
+  if ((sale.deliveryFee ?? 0) > 0) {
+    drawKeyValue(
+      'Delivery Fee',
+      formatMoney(sale.deliveryFee ?? 0, store.currency),
+      false,
+      baseFont
+    );
+  }
+  drawKeyValue(
+    `Tax (${sale.taxRate ?? 0}%)`,
+    formatMoney(sale.taxAmount ?? 0, store.currency),
+    false,
+    baseFont
+  );
 
   drawSolidDivider();
 
@@ -272,7 +297,38 @@ function renderReceiptIntoDoc(
 
   // Payment, Cash Received & Change / Return (omitted on unpaid pre-payment bills)
   if (!isProforma) {
-    if (sale.paymentMethod === 'cash') {
+    if (sale.paymentMethod === 'split' && sale.paymentSplit) {
+      const split = getSaleTenderBreakdown(sale);
+      drawKeyValue('Payment Method', 'SPLIT (MIX)', true, baseFont);
+      if (split.cash > 0) {
+        drawKeyValue(
+          (sale.changeDue ?? 0) > 0 ? 'Cash Applied' : 'Cash',
+          formatMoney(split.cash, store.currency),
+          false,
+          baseFont
+        );
+        if ((sale.changeDue ?? 0) > 0) {
+          drawKeyValue(
+            'Cash Received',
+            formatMoney(split.cash + (sale.changeDue ?? 0), store.currency),
+            false,
+            baseFont
+          );
+          drawKeyValue(
+            'Change / Return',
+            formatMoney(sale.changeDue ?? 0, store.currency),
+            true,
+            baseFont
+          );
+        }
+      }
+      if (split.card > 0) {
+        drawKeyValue('Card', formatMoney(split.card, store.currency), false, baseFont);
+      }
+      if (split.bank_qr > 0) {
+        drawKeyValue('Bank / QR', formatMoney(split.bank_qr, store.currency), false, baseFont);
+      }
+    } else if (sale.paymentMethod === 'cash') {
       drawKeyValue(
         'Cash Received',
         formatMoney(sale.amountTendered, store.currency),

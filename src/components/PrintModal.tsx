@@ -1,7 +1,14 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Download, ExternalLink, FileText, MessageCircle, Printer, X } from 'lucide-react';
 import type { PrintJob, Sale, StoreConfig } from '../types';
-import { formatDateTime, formatMoney, isProductStockTracked } from '../utils/posHelpers';
+import {
+  formatDailyToken,
+  formatDateTime,
+  formatMoney,
+  formatSalePaymentLabel,
+  getSaleTenderBreakdown,
+  isProductStockTracked,
+} from '../utils/posHelpers';
 import { generateReceiptPdfFile, triggerPdfDownload } from '../utils/receiptPdf';
 import { BarcodeSvg } from './BarcodeSvg';
 
@@ -37,6 +44,10 @@ function buildWhatsAppReceiptText(sale: Sale, store: StoreConfig, isProforma = f
   lines.push(`*${isProforma ? 'Bill Ref' : 'Invoice'}:* ${sale.invoiceNumber}`);
   lines.push(`*Date:* ${formatDateTime(sale.createdAt)}`);
   if (store.businessType === 'restaurant') {
+    const tokenLabel = formatDailyToken(sale.tokenNumber);
+    if (tokenLabel) {
+      lines.push(`*Token:* ${tokenLabel}`);
+    }
     const orderLabel = sale.orderType.replace('_', ' ').toUpperCase();
     lines.push(`*Order:* ${orderLabel}${sale.tableNumber ? ` · Table ${sale.tableNumber}` : ''}`);
   }
@@ -61,13 +72,39 @@ function buildWhatsAppReceiptText(sale: Sale, store: StoreConfig, isProforma = f
   });
   lines.push('────────────────────');
   lines.push(`Subtotal (${sale.itemCount} items): ${formatMoney(sale.subtotal, store.currency)}`);
-  lines.push(`Tax (${sale.taxRate ?? 0}%): ${formatMoney(sale.taxAmount ?? 0, store.currency)}`);
   if (sale.discount > 0) {
     lines.push(`Discount: -${formatMoney(sale.discount, store.currency)}`);
   }
+  if ((sale.serviceChargeAmount ?? 0) > 0) {
+    lines.push(
+      `Service Charge (${sale.serviceChargeRate ?? 0}%): ${formatMoney(
+        sale.serviceChargeAmount ?? 0,
+        store.currency
+      )}`
+    );
+  }
+  if ((sale.deliveryFee ?? 0) > 0) {
+    lines.push(`Delivery Fee: ${formatMoney(sale.deliveryFee ?? 0, store.currency)}`);
+  }
+  lines.push(`Tax (${sale.taxRate ?? 0}%): ${formatMoney(sale.taxAmount ?? 0, store.currency)}`);
   lines.push(`*${isProforma ? 'TOTAL PAYABLE' : 'GRAND TOTAL'}: ${formatMoney(sale.total, store.currency)}*`);
   if (!isProforma) {
-    if (sale.paymentMethod === 'cash') {
+    if (sale.paymentMethod === 'split' && sale.paymentSplit) {
+      const split = getSaleTenderBreakdown(sale);
+      lines.push('*Payment: SPLIT (MIX)*');
+      if (split.cash > 0) {
+        if ((sale.changeDue ?? 0) > 0) {
+          lines.push(
+            `  Cash Received: ${formatMoney(split.cash + (sale.changeDue ?? 0), store.currency)} (Applied ${formatMoney(split.cash, store.currency)})`
+          );
+          lines.push(`  *Change / Return: ${formatMoney(sale.changeDue ?? 0, store.currency)}*`);
+        } else {
+          lines.push(`  Cash: ${formatMoney(split.cash, store.currency)}`);
+        }
+      }
+      if (split.card > 0) lines.push(`  Card: ${formatMoney(split.card, store.currency)}`);
+      if (split.bank_qr > 0) lines.push(`  Bank / QR: ${formatMoney(split.bank_qr, store.currency)}`);
+    } else if (sale.paymentMethod === 'cash') {
       lines.push(`Cash Received: ${formatMoney(sale.amountTendered, store.currency)}`);
       lines.push(`*Change / Return: ${formatMoney(sale.changeDue ?? 0, store.currency)}*`);
     } else {
@@ -265,6 +302,11 @@ export const PrintModal: React.FC<PrintModalProps> = ({
               CUSTOMER BILL (UNPAID)
             </div>
           )}
+          {store.businessType === 'restaurant' && formatDailyToken(sale.tokenNumber) && (
+            <div className="mt-2 py-1 border border-slate-900 rounded text-sm font-bold tracking-wider">
+              TOKEN {formatDailyToken(sale.tokenNumber)}
+            </div>
+          )}
         </div>
 
         <div className="py-2.5 border-b border-dashed border-slate-300 space-y-1 text-[11px]">
@@ -348,16 +390,32 @@ export const PrintModal: React.FC<PrintModalProps> = ({
             <span>Subtotal ({sale.itemCount} items)</span>
             <span className="tabular-nums">{formatMoney(sale.subtotal, store.currency)}</span>
           </div>
-          <div className="flex justify-between">
-            <span>Tax ({sale.taxRate ?? 0}%)</span>
-            <span className="tabular-nums">{formatMoney(sale.taxAmount ?? 0, store.currency)}</span>
-          </div>
           {sale.discount > 0 && (
             <div className="flex justify-between">
               <span>Discount</span>
               <span className="tabular-nums">-{formatMoney(sale.discount, store.currency)}</span>
             </div>
           )}
+          {(sale.serviceChargeAmount ?? 0) > 0 && (
+            <div className="flex justify-between">
+              <span>Service Charge ({sale.serviceChargeRate ?? 0}%)</span>
+              <span className="tabular-nums">
+                {formatMoney(sale.serviceChargeAmount ?? 0, store.currency)}
+              </span>
+            </div>
+          )}
+          {(sale.deliveryFee ?? 0) > 0 && (
+            <div className="flex justify-between">
+              <span>Delivery Fee</span>
+              <span className="tabular-nums">
+                {formatMoney(sale.deliveryFee ?? 0, store.currency)}
+              </span>
+            </div>
+          )}
+          <div className="flex justify-between">
+            <span>Tax ({sale.taxRate ?? 0}%)</span>
+            <span className="tabular-nums">{formatMoney(sale.taxAmount ?? 0, store.currency)}</span>
+          </div>
           <div className="flex justify-between border-t border-slate-300 pt-1.5 text-sm font-bold">
             <span>{isProforma ? 'TOTAL PAYABLE' : 'GRAND TOTAL'}</span>
             <span className="tabular-nums">{formatMoney(sale.total, store.currency)}</span>
@@ -366,6 +424,57 @@ export const PrintModal: React.FC<PrintModalProps> = ({
             <div className="pt-1.5 text-center text-[11px] font-semibold text-slate-700">
               Payment Pending — Please pay at table or counter
             </div>
+          ) : sale.paymentMethod === 'split' && sale.paymentSplit ? (
+            (() => {
+              const split = getSaleTenderBreakdown(sale);
+              return (
+                <div className="pt-1.5 space-y-1 border-t border-dashed border-slate-200">
+                  <div className="font-semibold text-slate-900">Payment: SPLIT</div>
+                  {split.cash > 0 && (
+                    <>
+                      <div className="flex justify-between">
+                        <span>{(sale.changeDue ?? 0) > 0 ? 'Cash Applied' : 'Cash'}</span>
+                        <span className="tabular-nums font-medium">
+                          {formatMoney(split.cash, store.currency)}
+                        </span>
+                      </div>
+                      {(sale.changeDue ?? 0) > 0 && (
+                        <>
+                          <div className="flex justify-between text-slate-600">
+                            <span>Cash Received</span>
+                            <span className="tabular-nums">
+                              {formatMoney(split.cash + (sale.changeDue ?? 0), store.currency)}
+                            </span>
+                          </div>
+                          <div className="flex justify-between font-semibold">
+                            <span>Change / Return</span>
+                            <span className="tabular-nums">
+                              {formatMoney(sale.changeDue ?? 0, store.currency)}
+                            </span>
+                          </div>
+                        </>
+                      )}
+                    </>
+                  )}
+                  {split.card > 0 && (
+                    <div className="flex justify-between">
+                      <span>Card</span>
+                      <span className="tabular-nums font-medium">
+                        {formatMoney(split.card, store.currency)}
+                      </span>
+                    </div>
+                  )}
+                  {split.bank_qr > 0 && (
+                    <div className="flex justify-between">
+                      <span>Bank / QR</span>
+                      <span className="tabular-nums font-medium">
+                        {formatMoney(split.bank_qr, store.currency)}
+                      </span>
+                    </div>
+                  )}
+                </div>
+              );
+            })()
           ) : sale.paymentMethod === 'cash' ? (
             <>
               <div className="flex justify-between pt-1">
@@ -416,8 +525,20 @@ export const PrintModal: React.FC<PrintModalProps> = ({
 
       <div className="py-3 border-b border-dashed border-slate-400 flex items-center justify-between text-sm font-bold">
         <span>{sale.orderType.replace('_', ' ').toUpperCase()}</span>
-        <span>{sale.tableNumber ? `TABLE ${sale.tableNumber}` : 'COUNTER'}</span>
+        <span>
+          {sale.tableNumber
+            ? `TABLE ${sale.tableNumber}`
+            : formatDailyToken(sale.tokenNumber)
+            ? `TOKEN ${formatDailyToken(sale.tokenNumber)}`
+            : 'COUNTER'}
+        </span>
       </div>
+
+      {formatDailyToken(sale.tokenNumber) && sale.tableNumber && (
+        <div className="py-1.5 text-center border-b border-dashed border-slate-300 text-xs font-bold">
+          DAILY TOKEN {formatDailyToken(sale.tokenNumber)}
+        </div>
+      )}
 
       <div className="py-2 text-[11px] flex justify-between border-b border-dashed border-slate-300">
         <span>#{sale.invoiceNumber}</span>
@@ -516,9 +637,19 @@ export const PrintModal: React.FC<PrintModalProps> = ({
     const netProfit = completed.reduce((acc, s) => acc + s.profit, 0);
     const totalTax = completed.reduce((acc, s) => acc + s.taxAmount, 0);
     const totalDiscount = completed.reduce((acc, s) => acc + s.discount, 0);
-    const cashSales = completed.filter((s) => s.paymentMethod === 'cash').reduce((a, s) => a + s.total, 0);
-    const cardSales = completed.filter((s) => s.paymentMethod === 'card').reduce((a, s) => a + s.total, 0);
-    const qrSales = completed.filter((s) => s.paymentMethod === 'bank_qr').reduce((a, s) => a + s.total, 0);
+    const totalServiceCharge = completed.reduce((acc, s) => acc + (s.serviceChargeAmount ?? 0), 0);
+    const totalDeliveryFee = completed.reduce((acc, s) => acc + (s.deliveryFee ?? 0), 0);
+    const { cashSales, cardSales, qrSales } = completed.reduce(
+      (acc, s) => {
+        const b = getSaleTenderBreakdown(s);
+        return {
+          cashSales: acc.cashSales + b.cash,
+          cardSales: acc.cardSales + b.card,
+          qrSales: acc.qrSales + b.bank_qr,
+        };
+      },
+      { cashSales: 0, cardSales: 0, qrSales: 0 }
+    );
     const lowStockCount = products.filter(
       (p) => isProductStockTracked(p) && p.stock <= p.minStock
     ).length;
@@ -601,6 +732,22 @@ export const PrintModal: React.FC<PrintModalProps> = ({
               <span>Sales Tax Collected</span>
               <span className="font-mono tabular-nums">{formatMoney(totalTax, store.currency)}</span>
             </div>
+            {store.businessType === 'restaurant' && (
+              <>
+                <div className="flex justify-between">
+                  <span>Service Charges Collected</span>
+                  <span className="font-mono tabular-nums">
+                    {formatMoney(totalServiceCharge, store.currency)}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span>Delivery Fees Collected</span>
+                  <span className="font-mono tabular-nums">
+                    {formatMoney(totalDeliveryFee, store.currency)}
+                  </span>
+                </div>
+              </>
+            )}
             <div className="flex justify-between">
               <span>Discounts Granted</span>
               <span className="font-mono tabular-nums">{formatMoney(totalDiscount, store.currency)}</span>
@@ -633,7 +780,7 @@ export const PrintModal: React.FC<PrintModalProps> = ({
                 daySales.map((s) => (
                   <tr key={s.id}>
                     <td className="py-1.5 font-mono">{s.invoiceNumber}</td>
-                    <td className="py-1.5 uppercase">{s.paymentMethod.replace('_', '/')}</td>
+                    <td className="py-1.5 uppercase">{formatSalePaymentLabel(s, store.currency)}</td>
                     <td className="py-1.5 capitalize">{s.status}</td>
                     <td className="py-1.5 text-right font-mono tabular-nums">{s.itemCount}</td>
                     <td className="py-1.5 text-right font-mono tabular-nums font-medium">

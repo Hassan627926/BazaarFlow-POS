@@ -45,6 +45,12 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [tableCount, setTableCount] = useState(
     String(store.tableCount ?? BLUEPRINT_LIMITS.TABLE_COUNT_DEFAULT)
   );
+  const [serviceChargeRate, setServiceChargeRate] = useState(
+    String(store.serviceChargeRate ?? 0)
+  );
+  const [defaultDeliveryFee, setDefaultDeliveryFee] = useState(
+    String(store.defaultDeliveryFee ?? 0)
+  );
   const [address, setAddress] = useState(store.address);
   const [phone, setPhone] = useState(store.phone);
   const [receiptFooter, setReceiptFooter] = useState(store.receiptFooter);
@@ -60,6 +66,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     setCurrency(store.currency);
     setTaxRate(String(store.taxRate));
     setTableCount(String(store.tableCount ?? BLUEPRINT_LIMITS.TABLE_COUNT_DEFAULT));
+    setServiceChargeRate(String(store.serviceChargeRate ?? 0));
+    setDefaultDeliveryFee(String(store.defaultDeliveryFee ?? 0));
     setAddress(store.address);
     setPhone(store.phone);
     setReceiptFooter(store.receiptFooter);
@@ -107,12 +115,32 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       return;
     }
 
+    const parsedServiceCharge = Number(serviceChargeRate || 0);
+    if (
+      !Number.isFinite(parsedServiceCharge) ||
+      parsedServiceCharge < 0 ||
+      parsedServiceCharge > BLUEPRINT_LIMITS.SERVICE_CHARGE_MAX
+    ) {
+      setError(`Dine-In service charge must be between 0% and ${BLUEPRINT_LIMITS.SERVICE_CHARGE_MAX}%.`);
+      return;
+    }
+
+    const parsedDeliveryFee = Number(defaultDeliveryFee || 0);
+    if (
+      !Number.isFinite(parsedDeliveryFee) ||
+      parsedDeliveryFee < 0 ||
+      parsedDeliveryFee > BLUEPRINT_LIMITS.DELIVERY_FEE_MAX
+    ) {
+      setError(`Default delivery fee must be between 0 and ${BLUEPRINT_LIMITS.DELIVERY_FEE_MAX}.`);
+      return;
+    }
+
     setSaving(true);
     setError(null);
     setSavedNotice(false);
     const path = `stores/${store.id}`;
     try {
-      await updateDoc(doc(db, 'stores', store.id), {
+      const updatePayload: Record<string, unknown> = {
         name: cleanName.slice(0, BLUEPRINT_LIMITS.STORE_NAME_MAX),
         logoDataUrl: logoDataUrl.slice(0, BLUEPRINT_LIMITS.LOGO_DATA_URL_MAX),
         primaryColor,
@@ -124,7 +152,12 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         phone: phone.trim().slice(0, BLUEPRINT_LIMITS.PHONE_MAX),
         receiptFooter: receiptFooter.trim().slice(0, BLUEPRINT_LIMITS.RECEIPT_FOOTER_MAX),
         updatedAt: serverTimestamp(),
-      });
+      };
+      if (store.businessType === 'restaurant') {
+        updatePayload.serviceChargeRate = Number(parsedServiceCharge.toFixed(2));
+        updatePayload.defaultDeliveryFee = Number(parsedDeliveryFee.toFixed(2));
+      }
+      await updateDoc(doc(db, 'stores', store.id), updatePayload);
       setSavedNotice(true);
       window.setTimeout(() => setSavedNotice(false), 2600);
     } catch (err) {
@@ -256,20 +289,55 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             </div>
 
             {store.businessType === 'restaurant' && (
-              <div className="sm:col-span-2">
-                <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
-                  Dine-In Tables Count (1 – {BLUEPRINT_LIMITS.TABLE_COUNT_MAX})
-                </label>
-                <input
-                  type="number"
-                  min="1"
-                  max={BLUEPRINT_LIMITS.TABLE_COUNT_MAX}
-                  step="1"
-                  value={tableCount}
-                  onChange={(e) => setTableCount(e.target.value)}
-                  className="w-full sm:w-48 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-3.5 py-2 text-sm font-mono tabular-nums text-slate-900 dark:text-slate-100"
-                />
-              </div>
+              <>
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
+                    Dine-In Tables Count (1 – {BLUEPRINT_LIMITS.TABLE_COUNT_MAX})
+                  </label>
+                  <input
+                    type="number"
+                    min="1"
+                    max={BLUEPRINT_LIMITS.TABLE_COUNT_MAX}
+                    step="1"
+                    value={tableCount}
+                    onChange={(e) => setTableCount(e.target.value)}
+                    className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-3.5 py-2 text-sm font-mono tabular-nums text-slate-900 dark:text-slate-100"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
+                    Dine-In Service Charge (%)
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    max={BLUEPRINT_LIMITS.SERVICE_CHARGE_MAX}
+                    step="0.5"
+                    value={serviceChargeRate}
+                    onChange={(e) => setServiceChargeRate(e.target.value)}
+                    className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-3.5 py-2 text-sm font-mono tabular-nums text-slate-900 dark:text-slate-100"
+                  />
+                </div>
+
+                <div className="sm:col-span-2">
+                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
+                    Default Delivery Fee ({currency})
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    max={BLUEPRINT_LIMITS.DELIVERY_FEE_MAX}
+                    step="10"
+                    value={defaultDeliveryFee}
+                    onChange={(e) => setDefaultDeliveryFee(e.target.value)}
+                    className="w-full sm:w-56 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-3.5 py-2 text-sm font-mono tabular-nums text-slate-900 dark:text-slate-100"
+                  />
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
+                    Auto-filled on Delivery orders (can still be adjusted or set to 0 per bill).
+                  </p>
+                </div>
+              </>
             )}
 
             <div>

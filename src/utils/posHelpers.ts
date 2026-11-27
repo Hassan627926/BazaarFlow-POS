@@ -1,4 +1,4 @@
-import type { Product, Sale, StoreConfig } from '../types';
+import type { PaymentSplit, Product, Sale, StoreConfig } from '../types';
 
 export interface ThemePreset {
   id: string;
@@ -67,6 +67,111 @@ export function generateInvoiceNumber(storeName: string): string {
   ).padStart(2, '0')}`;
   const seq = String(Math.floor(1000 + Math.random() * 9000));
   return `${prefix}-${ymd}-${seq}`;
+}
+
+export function formatDailyToken(tokenNumber?: number): string {
+  if (!tokenNumber || !Number.isFinite(tokenNumber) || tokenNumber <= 0) return '';
+  return `#${String(Math.floor(tokenNumber)).padStart(2, '0')}`;
+}
+
+export function getSaleTenderBreakdown(
+  sale: Pick<Sale, 'paymentMethod' | 'paymentSplit' | 'total'>
+): { cash: number; card: number; bank_qr: number } {
+  if (sale.paymentMethod === 'split' && sale.paymentSplit) {
+    const cash = Number(sale.paymentSplit.cash ?? 0);
+    const card = Number(sale.paymentSplit.card ?? 0);
+    const bank_qr = Number(sale.paymentSplit.bank_qr ?? 0);
+    return {
+      cash: Number.isFinite(cash) && cash > 0 ? Number(cash.toFixed(2)) : 0,
+      card: Number.isFinite(card) && card > 0 ? Number(card.toFixed(2)) : 0,
+      bank_qr: Number.isFinite(bank_qr) && bank_qr > 0 ? Number(bank_qr.toFixed(2)) : 0,
+    };
+  }
+  const safeTotal = Number.isFinite(sale.total) && sale.total > 0 ? Number(sale.total.toFixed(2)) : 0;
+  return {
+    cash: sale.paymentMethod === 'cash' ? safeTotal : 0,
+    card: sale.paymentMethod === 'card' ? safeTotal : 0,
+    bank_qr: sale.paymentMethod === 'bank_qr' ? safeTotal : 0,
+  };
+}
+
+export function formatSalePaymentLabel(
+  sale: Pick<Sale, 'paymentMethod' | 'paymentSplit' | 'total'>,
+  currency?: string
+): string {
+  if (sale.paymentMethod !== 'split') {
+    return sale.paymentMethod === 'bank_qr' ? 'BANK/QR' : sale.paymentMethod.toUpperCase();
+  }
+  const split = getSaleTenderBreakdown(sale);
+  const fmt = (val: number) => (currency ? formatMoney(val, currency) : val.toFixed(2));
+  const parts: string[] = [];
+  if (split.cash > 0) parts.push(`Cash ${fmt(split.cash)}`);
+  if (split.card > 0) parts.push(`Card ${fmt(split.card)}`);
+  if (split.bank_qr > 0) parts.push(`Bank/QR ${fmt(split.bank_qr)}`);
+  return parts.length > 0 ? `SPLIT (${parts.join(' + ')})` : 'SPLIT';
+}
+
+export function computeSplitPaymentSettlement(params: {
+  grandTotal: number;
+  cashHandedInput: string;
+  cardInput: string;
+  bankQrInput: string;
+}): {
+  cashHanded: number;
+  cardAmount: number;
+  bankQrAmount: number;
+  cashApplied: number;
+  nonCashTotal: number;
+  tenderedTotal: number;
+  remainingToPay: number;
+  changeDue: number;
+  nonCashExceedsTotal: boolean;
+  activeMethodsCount: number;
+  paymentSplit: PaymentSplit;
+} {
+  const safeTotal = Math.max(0, Number(params.grandTotal.toFixed(2)));
+  const parsePart = (raw: string) => {
+    const n = Number(raw);
+    if (!raw.trim() || !Number.isFinite(n) || n <= 0) return 0;
+    return Number(n.toFixed(2));
+  };
+
+  const cashHanded = parsePart(params.cashHandedInput);
+  const cardAmount = parsePart(params.cardInput);
+  const bankQrAmount = parsePart(params.bankQrInput);
+  const nonCashTotal = Number((cardAmount + bankQrAmount).toFixed(2));
+  const nonCashExceedsTotal = nonCashTotal > Number((safeTotal + 0.01).toFixed(2));
+
+  const remainingAfterNonCash = Math.max(0, Number((safeTotal - nonCashTotal).toFixed(2)));
+  const cashApplied = Number(Math.min(cashHanded, remainingAfterNonCash).toFixed(2));
+  const changeDue =
+    !nonCashExceedsTotal && cashHanded > remainingAfterNonCash
+      ? Number((cashHanded - remainingAfterNonCash).toFixed(2))
+      : 0;
+  const tenderedTotal = Number((cashHanded + nonCashTotal).toFixed(2));
+  const remainingToPay = Math.max(0, Number((safeTotal - tenderedTotal).toFixed(2)));
+
+  const paymentSplit: PaymentSplit = {
+    ...(cashApplied > 0 ? { cash: cashApplied } : {}),
+    ...(cardAmount > 0 ? { card: cardAmount } : {}),
+    ...(bankQrAmount > 0 ? { bank_qr: bankQrAmount } : {}),
+  };
+
+  const activeMethodsCount = [cashApplied > 0, cardAmount > 0, bankQrAmount > 0].filter(Boolean).length;
+
+  return {
+    cashHanded,
+    cardAmount,
+    bankQrAmount,
+    cashApplied,
+    nonCashTotal,
+    tenderedTotal,
+    remainingToPay,
+    changeDue,
+    nonCashExceedsTotal,
+    activeMethodsCount,
+    paymentSplit,
+  };
 }
 
 /**
@@ -162,9 +267,19 @@ export function exportDailySummaryCSV(store: StoreConfig, dateKey: string, sales
   const totalProfit = completed.reduce((acc, s) => acc + s.profit, 0);
   const totalTax = completed.reduce((acc, s) => acc + s.taxAmount, 0);
   const totalDiscount = completed.reduce((acc, s) => acc + s.discount, 0);
-  const cashTotal = completed.filter((s) => s.paymentMethod === 'cash').reduce((a, s) => a + s.total, 0);
-  const cardTotal = completed.filter((s) => s.paymentMethod === 'card').reduce((a, s) => a + s.total, 0);
-  const qrTotal = completed.filter((s) => s.paymentMethod === 'bank_qr').reduce((a, s) => a + s.total, 0);
+  const totalServiceCharge = completed.reduce((acc, s) => acc + (s.serviceChargeAmount ?? 0), 0);
+  const totalDeliveryFee = completed.reduce((acc, s) => acc + (s.deliveryFee ?? 0), 0);
+  const { cashTotal, cardTotal, qrTotal } = completed.reduce(
+    (acc, s) => {
+      const breakdown = getSaleTenderBreakdown(s);
+      return {
+        cashTotal: acc.cashTotal + breakdown.cash,
+        cardTotal: acc.cardTotal + breakdown.card,
+        qrTotal: acc.qrTotal + breakdown.bank_qr,
+      };
+    },
+    { cashTotal: 0, cardTotal: 0, qrTotal: 0 }
+  );
 
   const rows: (string | number)[][] = [
     ['DAILY OWNER SUMMARY REPORT'],
@@ -180,6 +295,8 @@ export function exportDailySummaryCSV(store: StoreConfig, dateKey: string, sales
     ['Total Cost of Goods (COGS)', totalCost.toFixed(2)],
     ['Net Profit', totalProfit.toFixed(2)],
     ['Tax Collected', totalTax.toFixed(2)],
+    ['Service Charges Collected', totalServiceCharge.toFixed(2)],
+    ['Delivery Fees Collected', totalDeliveryFee.toFixed(2)],
     ['Discounts Granted', totalDiscount.toFixed(2)],
     ['Cash Sales', cashTotal.toFixed(2)],
     ['Card Sales', cardTotal.toFixed(2)],
@@ -188,6 +305,7 @@ export function exportDailySummaryCSV(store: StoreConfig, dateKey: string, sales
     ['INVOICE BREAKDOWN'],
     [
       'Invoice #',
+      'Token #',
       'Status',
       'Order Type',
       'Table / Customer',
@@ -196,20 +314,25 @@ export function exportDailySummaryCSV(store: StoreConfig, dateKey: string, sales
       'Payment',
       'Subtotal',
       'Discount',
+      'Service Charge',
+      'Delivery Fee',
       'Tax',
       'Total',
       'Profit',
     ],
     ...daySales.map((s) => [
       s.invoiceNumber,
+      formatDailyToken(s.tokenNumber) || '-',
       s.status,
       s.orderType,
       s.tableNumber || s.customerName || '-',
       s.employeeName || '-',
       s.itemCount,
-      s.paymentMethod,
+      formatSalePaymentLabel(s),
       s.subtotal.toFixed(2),
       s.discount.toFixed(2),
+      (s.serviceChargeAmount ?? 0).toFixed(2),
+      (s.deliveryFee ?? 0).toFixed(2),
       s.taxAmount.toFixed(2),
       s.total.toFixed(2),
       s.profit.toFixed(2),
@@ -225,6 +348,7 @@ export function exportSalesLedgerCSV(store: StoreConfig, sales: Sale[]): void {
     [
       'Date',
       'Invoice #',
+      'Token #',
       'Status',
       'Order Type',
       'Table / Customer',
@@ -233,6 +357,8 @@ export function exportSalesLedgerCSV(store: StoreConfig, sales: Sale[]): void {
       'Payment Method',
       'Subtotal',
       'Discount',
+      'Service Charge',
+      'Delivery Fee',
       'Tax',
       'Total',
       'Cost',
@@ -241,14 +367,17 @@ export function exportSalesLedgerCSV(store: StoreConfig, sales: Sale[]): void {
     ...sales.map((s) => [
       s.dateKey,
       s.invoiceNumber,
+      formatDailyToken(s.tokenNumber) || '-',
       s.status,
       s.orderType,
       s.tableNumber || s.customerName || '-',
       s.employeeName || '-',
       s.itemCount,
-      s.paymentMethod,
+      formatSalePaymentLabel(s),
       s.subtotal.toFixed(2),
       s.discount.toFixed(2),
+      (s.serviceChargeAmount ?? 0).toFixed(2),
+      (s.deliveryFee ?? 0).toFixed(2),
       s.taxAmount.toFixed(2),
       s.total.toFixed(2),
       s.totalCost.toFixed(2),

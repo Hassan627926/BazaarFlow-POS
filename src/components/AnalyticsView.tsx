@@ -17,6 +17,7 @@ import {
   exportInventoryCSV,
   exportSalesLedgerCSV,
   formatMoney,
+  getSaleTenderBreakdown,
   getTodayDateKey,
   isProductStockTracked,
 } from '../utils/posHelpers';
@@ -55,15 +56,17 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
     const avgTicket = orders > 0 ? revenue / orders : 0;
     const margin = revenue > 0 ? (profit / revenue) * 100 : 0;
 
-    const cash = dayCompleted
-      .filter((s) => s.paymentMethod === 'cash')
-      .reduce((a, s) => a + s.total, 0);
-    const card = dayCompleted
-      .filter((s) => s.paymentMethod === 'card')
-      .reduce((a, s) => a + s.total, 0);
-    const bankQr = dayCompleted
-      .filter((s) => s.paymentMethod === 'bank_qr')
-      .reduce((a, s) => a + s.total, 0);
+    const { cash, card, bankQr } = dayCompleted.reduce(
+      (acc, s) => {
+        const b = getSaleTenderBreakdown(s);
+        return {
+          cash: acc.cash + b.cash,
+          card: acc.card + b.card,
+          bankQr: acc.bankQr + b.bank_qr,
+        };
+      },
+      { cash: 0, card: 0, bankQr: 0 }
+    );
 
     return {
       revenue,

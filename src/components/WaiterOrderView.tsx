@@ -25,6 +25,7 @@ import {
   Trash2,
   UserCheck,
   UtensilsCrossed,
+  Wallet,
   X,
 } from 'lucide-react';
 import { doc, serverTimestamp, setDoc, writeBatch } from 'firebase/firestore';
@@ -46,8 +47,10 @@ import {
   type WaiterAccess,
 } from '../types';
 import {
+  computeSplitPaymentSettlement,
   formatDishNameWithVariant,
   formatMoney,
+  formatSalePaymentLabel,
   generateInvoiceNumber,
   generateSafeId,
   getLineItemKey,
@@ -203,6 +206,9 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
   const [billModalOpen, setBillModalOpen] = useState<boolean>(false);
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('cash');
   const [cashReceived, setCashReceived] = useState<string>('');
+  const [splitCashInput, setSplitCashInput] = useState<string>('');
+  const [splitCardInput, setSplitCardInput] = useState<string>('');
+  const [splitBankQrInput, setSplitBankQrInput] = useState<string>('');
   const [settlingBill, setSettlingBill] = useState<boolean>(false);
   const [billError, setBillError] = useState<string | null>(null);
 
@@ -446,32 +452,87 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
   };
 
   const billCalculations = useMemo(() => {
+    const defaultServiceRate = Number(store.serviceChargeRate ?? 0);
     if (!activeTableSession) {
-      return { subtotal: 0, taxRate: store.taxRate ?? 0, taxAmount: 0, total: 0, tendered: 0, changeDue: 0 };
+      return {
+        subtotal: 0,
+        serviceChargeRate: defaultServiceRate,
+        serviceChargeAmount: 0,
+        taxRate: store.taxRate ?? 0,
+        taxAmount: 0,
+        total: 0,
+        tendered: 0,
+        changeDue: 0,
+        splitMetrics: computeSplitPaymentSettlement({
+          grandTotal: 0,
+          cashHandedInput: '',
+          cardInput: '',
+          bankQrInput: '',
+        }),
+      };
     }
     const subtotal = Number(activeTableSession.subtotal.toFixed(2));
+    const serviceChargeRate = defaultServiceRate;
+    const serviceChargeAmount = Number(((subtotal * serviceChargeRate) / 100).toFixed(2));
     const taxRate = Number(store.taxRate ?? 0);
     const taxAmount = Number(((subtotal * taxRate) / 100).toFixed(2));
-    const total = Number((subtotal + taxAmount).toFixed(2));
+    const total = Number((subtotal + serviceChargeAmount + taxAmount).toFixed(2));
+    const splitMetrics = computeSplitPaymentSettlement({
+      grandTotal: total,
+      cashHandedInput: splitCashInput,
+      cardInput: splitCardInput,
+      bankQrInput: splitBankQrInput,
+    });
     const parsedCash = Number(cashReceived);
     const tendered =
-      paymentMethod === 'cash'
+      paymentMethod === 'split'
+        ? splitMetrics.tenderedTotal
+        : paymentMethod === 'cash'
         ? Number.isFinite(parsedCash) && parsedCash > 0
           ? Number(parsedCash.toFixed(2))
           : 0
         : total;
     const changeDue =
-      paymentMethod === 'cash' ? Math.max(0, Number((tendered - total).toFixed(2))) : 0;
-    return { subtotal, taxRate, taxAmount, total, tendered, changeDue };
-  }, [activeTableSession, store.taxRate, cashReceived, paymentMethod]);
+      paymentMethod === 'split'
+        ? splitMetrics.changeDue
+        : paymentMethod === 'cash'
+        ? Math.max(0, Number((tendered - total).toFixed(2)))
+        : 0;
+    return {
+      subtotal,
+      serviceChargeRate,
+      serviceChargeAmount,
+      taxRate,
+      taxAmount,
+      total,
+      tendered,
+      changeDue,
+      splitMetrics,
+    };
+  }, [
+    activeTableSession,
+    store.serviceChargeRate,
+    store.taxRate,
+    cashReceived,
+    paymentMethod,
+    splitCashInput,
+    splitCardInput,
+    splitBankQrInput,
+  ]);
 
   const openBillModal = () => {
     if (!activeTableSession || !canSettleBills) return;
     const subtotal = Number(activeTableSession.subtotal.toFixed(2));
+    const serviceChargeRate = Number(store.serviceChargeRate ?? 0);
+    const serviceChargeAmount = Number(((subtotal * serviceChargeRate) / 100).toFixed(2));
     const taxRate = Number(store.taxRate ?? 0);
-    const total = Number((subtotal + (subtotal * taxRate) / 100).toFixed(2));
+    const taxAmount = Number(((subtotal * taxRate) / 100).toFixed(2));
+    const total = Number((subtotal + serviceChargeAmount + taxAmount).toFixed(2));
     setPaymentMethod('cash');
     setCashReceived(String(total));
+    setSplitCashInput('');
+    setSplitCardInput('');
+    setSplitBankQrInput('');
     setBillError(null);
     setBillModalOpen(true);
   };
@@ -488,6 +549,28 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
       return;
     }
 
+    if (paymentMethod === 'split') {
+      if (billCalculations.splitMetrics.nonCashExceedsTotal) {
+        setBillError('Card + Bank/QR total cannot exceed the bill total.');
+        return;
+      }
+      if (billCalculations.splitMetrics.remainingToPay > 0) {
+        setBillError(
+          `Split payments are short by ${formatMoney(
+            billCalculations.splitMetrics.remainingToPay,
+            store.currency
+          )}.`
+        );
+        return;
+      }
+      if (billCalculations.total > 0 && billCalculations.splitMetrics.activeMethodsCount < 2) {
+        setBillError(
+          'Enter amounts for at least 2 payment methods (e.g. Cash + Card) for Split Payment.'
+        );
+        return;
+      }
+    }
+
     setSettlingBill(true);
     setBillError(null);
 
@@ -498,7 +581,9 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
     const salePath = `stores/${store.id}/sales/${saleId}`;
 
     const totalCost = Number(activeTableSession.totalCost.toFixed(2));
-    const profit = Number((billCalculations.subtotal - totalCost).toFixed(2));
+    const profit = Number(
+      (billCalculations.subtotal + billCalculations.serviceChargeAmount - totalCost).toFixed(2)
+    );
     const empId = (activeTableSession.employeeId || effectiveWaiter.id || '').slice(0, 128);
     const empName = (activeTableSession.employeeName || effectiveWaiter.name || '').slice(
       0,
@@ -519,12 +604,19 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
       itemCount: activeTableSession.itemCount,
       subtotal: billCalculations.subtotal,
       discount: 0,
+      ...(billCalculations.serviceChargeRate > 0 || billCalculations.serviceChargeAmount > 0
+        ? {
+            serviceChargeRate: billCalculations.serviceChargeRate,
+            serviceChargeAmount: billCalculations.serviceChargeAmount,
+          }
+        : {}),
       taxRate: billCalculations.taxRate,
       taxAmount: billCalculations.taxAmount,
       total: billCalculations.total,
       totalCost,
       profit,
       paymentMethod,
+      ...(paymentMethod === 'split' ? { paymentSplit: billCalculations.splitMetrics.paymentSplit } : {}),
       amountTendered: billCalculations.tendered,
       changeDue: billCalculations.changeDue,
       orderType: 'dine_in' as const,
@@ -569,10 +661,10 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
       setBillModalOpen(false);
       closeTable();
       flashNotice(
-        `Table ${clearedTableNum} bill cleared (${paymentMethod.replace('_', '/').toUpperCase()} ${formatMoney(
-          billCalculations.total,
+        `Table ${clearedTableNum} bill cleared (${formatSalePaymentLabel(
+          receiptSale,
           store.currency
-        )})! Counter Laptop notified.`,
+        )} · ${formatMoney(billCalculations.total, store.currency)})! Counter Laptop notified.`,
         { type: 'receipt', sale: receiptSale }
       );
     } catch (err) {
@@ -933,9 +1025,11 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
 
   const handlePrintProformaBill = (session: TableSession) => {
     const subtotal = Number(session.subtotal.toFixed(2));
+    const serviceChargeRate = Number(store.serviceChargeRate ?? 0);
+    const serviceChargeAmount = Number(((subtotal * serviceChargeRate) / 100).toFixed(2));
     const taxRate = Number(store.taxRate || 0);
     const taxAmount = Number(((subtotal * taxRate) / 100).toFixed(2));
-    const total = Number((subtotal + taxAmount).toFixed(2));
+    const total = Number((subtotal + serviceChargeAmount + taxAmount).toFixed(2));
     const billRef = `BILL-T${session.tableNumber}-${String(Date.now()).slice(-4)}`;
 
     const proformaSale: Sale = {
@@ -948,11 +1042,13 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
       itemCount: session.itemCount,
       subtotal,
       discount: 0,
+      serviceChargeRate,
+      serviceChargeAmount,
       taxRate,
       taxAmount,
       total,
       totalCost: Number((session.totalCost || 0).toFixed(2)),
-      profit: Number((total - (session.totalCost || 0)).toFixed(2)),
+      profit: Number((subtotal + serviceChargeAmount - (session.totalCost || 0)).toFixed(2)),
       paymentMethod: 'cash',
       amountTendered: 0,
       changeDue: 0,
@@ -2724,6 +2820,14 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
                   {formatMoney(billCalculations.subtotal, store.currency)}
                 </span>
               </div>
+              {(billCalculations.serviceChargeRate > 0 || billCalculations.serviceChargeAmount > 0) && (
+                <div className="flex items-center justify-between text-slate-600 dark:text-slate-400">
+                  <span>Service Charge ({billCalculations.serviceChargeRate}%)</span>
+                  <span className="font-mono tabular-nums">
+                    {formatMoney(billCalculations.serviceChargeAmount, store.currency)}
+                  </span>
+                </div>
+              )}
               {billCalculations.taxRate > 0 && (
                 <div className="flex items-center justify-between text-slate-600 dark:text-slate-400">
                   <span>Tax ({billCalculations.taxRate}%)</span>
@@ -2745,12 +2849,13 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
               <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300">
                 Payment Method
               </label>
-              <div className="grid grid-cols-3 gap-2">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                 {(
                   [
                     { id: 'cash', label: 'Cash', icon: Banknote },
                     { id: 'card', label: 'Card', icon: CreditCard },
                     { id: 'bank_qr', label: 'Bank / QR', icon: Landmark },
+                    { id: 'split', label: 'Split', icon: Wallet },
                   ] as const
                 ).map(({ id, label, icon: Icon }) => (
                   <button
@@ -2824,6 +2929,136 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
                     {formatMoney(billCalculations.changeDue, store.currency)}
                   </span>
                 </div>
+              </div>
+            )}
+
+            {/* Split Payment Breakdown Inputs */}
+            {paymentMethod === 'split' && (
+              <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 p-3.5 space-y-2.5 text-xs">
+                <div className="flex items-center justify-between">
+                  <span className="font-semibold text-slate-800 dark:text-slate-200">
+                    Split Bill ({formatMoney(billCalculations.total, store.currency)})
+                  </span>
+                  {(splitCashInput || splitCardInput || splitBankQrInput) && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSplitCashInput('');
+                        setSplitCardInput('');
+                        setSplitBankQrInput('');
+                        setBillError(null);
+                      }}
+                      className="text-[11px] font-medium text-slate-500 hover:text-red-600 cursor-pointer"
+                    >
+                      Clear
+                    </button>
+                  )}
+                </div>
+
+                {(
+                  [
+                    {
+                      id: 'waiter-split-cash',
+                      label: 'Cash',
+                      value: splitCashInput,
+                      setter: setSplitCashInput,
+                      otherSum:
+                        billCalculations.splitMetrics.cardAmount +
+                        billCalculations.splitMetrics.bankQrAmount,
+                    },
+                    {
+                      id: 'waiter-split-card',
+                      label: 'Card',
+                      value: splitCardInput,
+                      setter: setSplitCardInput,
+                      otherSum:
+                        billCalculations.splitMetrics.cashHanded +
+                        billCalculations.splitMetrics.bankQrAmount,
+                    },
+                    {
+                      id: 'waiter-split-qr',
+                      label: 'Bank / QR',
+                      value: splitBankQrInput,
+                      setter: setSplitBankQrInput,
+                      otherSum:
+                        billCalculations.splitMetrics.cashHanded +
+                        billCalculations.splitMetrics.cardAmount,
+                    },
+                  ] as const
+                ).map((row) => {
+                  const restForField = Math.max(
+                    0,
+                    Number((billCalculations.total - row.otherSum).toFixed(2))
+                  );
+                  return (
+                    <div key={row.id} className="flex items-center justify-between gap-2">
+                      <label
+                        htmlFor={row.id}
+                        className="font-semibold text-slate-700 dark:text-slate-300 whitespace-nowrap"
+                      >
+                        {row.label}
+                      </label>
+                      <div className="flex items-center gap-1.5">
+                        {restForField > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              row.setter(String(restForField));
+                              setBillError(null);
+                            }}
+                            className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-2 py-1.5 text-[11px] font-semibold text-slate-700 dark:text-slate-200 cursor-pointer whitespace-nowrap"
+                          >
+                            Fill Rest
+                          </button>
+                        )}
+                        <input
+                          id={row.id}
+                          type="number"
+                          min={0}
+                          step="any"
+                          inputMode="decimal"
+                          value={row.value}
+                          onChange={(e) => {
+                            row.setter(e.target.value);
+                            setBillError(null);
+                          }}
+                          placeholder="0.00"
+                          className="w-28 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-right font-mono font-bold text-sm text-slate-900 dark:text-slate-100"
+                        />
+                      </div>
+                    </div>
+                  );
+                })}
+
+                {billCalculations.splitMetrics.nonCashExceedsTotal ? (
+                  <div className="rounded-lg bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-900/60 px-3 py-2 flex items-center justify-between font-semibold text-red-700 dark:text-red-300">
+                    <span>Card + Bank/QR exceeds bill total</span>
+                    <span className="font-mono tabular-nums">
+                      {formatMoney(billCalculations.splitMetrics.nonCashTotal, store.currency)}
+                    </span>
+                  </div>
+                ) : billCalculations.splitMetrics.remainingToPay > 0 ? (
+                  <div className="rounded-lg bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900/60 px-3 py-2 flex items-center justify-between font-semibold text-amber-800 dark:text-amber-300">
+                    <span>Remaining to Allocate</span>
+                    <span className="font-mono tabular-nums">
+                      {formatMoney(billCalculations.splitMetrics.remainingToPay, store.currency)}
+                    </span>
+                  </div>
+                ) : billCalculations.splitMetrics.changeDue > 0 ? (
+                  <div className="rounded-lg bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900/60 px-3 py-2 flex items-center justify-between font-semibold text-emerald-800 dark:text-emerald-300">
+                    <span>Change / Return (Cash)</span>
+                    <span className="font-mono tabular-nums">
+                      {formatMoney(billCalculations.splitMetrics.changeDue, store.currency)}
+                    </span>
+                  </div>
+                ) : (
+                  <div className="rounded-lg bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900/60 px-3 py-2 flex items-center justify-between font-semibold text-emerald-800 dark:text-emerald-300">
+                    <span>Split Matched</span>
+                    <span className="font-mono tabular-nums">
+                      {formatMoney(billCalculations.total, store.currency)}
+                    </span>
+                  </div>
+                )}
               </div>
             )}
 

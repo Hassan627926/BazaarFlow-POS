@@ -1,7 +1,13 @@
 import type { Timestamp } from 'firebase/firestore';
 
 export type BusinessType = 'retail' | 'restaurant';
-export type PaymentMethod = 'cash' | 'card' | 'bank_qr';
+export type PaymentMethod = 'cash' | 'card' | 'bank_qr' | 'split';
+
+export interface PaymentSplit {
+  cash?: number;
+  card?: number;
+  bank_qr?: number;
+}
 export type OrderType = 'retail' | 'dine_in' | 'takeaway' | 'delivery';
 export type SaleStatus = 'completed' | 'voided';
 export type StockReason = 'restock' | 'sale' | 'void_restore' | 'damage' | 'adjustment';
@@ -22,6 +28,9 @@ export const BLUEPRINT_LIMITS = {
   LOGO_DATA_URL_MAX: 120000,
   CURRENCY_MAX: 10,
   TAX_RATE_MAX: 50,
+  SERVICE_CHARGE_MAX: 30,
+  DELIVERY_FEE_MAX: 100000,
+  TOKEN_NUMBER_MAX: 99999,
   TABLE_COUNT_DEFAULT: 12,
   TABLE_COUNT_MAX: 60,
   ADDRESS_MAX: 200,
@@ -62,6 +71,8 @@ export interface StoreConfig {
   currency: string;
   taxRate: number;
   tableCount?: number;
+  serviceChargeRate?: number;
+  defaultDeliveryFee?: number;
   address: string;
   phone: string;
   receiptFooter: string;
@@ -120,12 +131,17 @@ export interface Sale {
   itemCount: number;
   subtotal: number;
   discount: number;
+  serviceChargeRate?: number;
+  serviceChargeAmount?: number;
+  deliveryFee?: number;
   taxRate: number;
   taxAmount: number;
   total: number;
   totalCost: number;
   profit: number;
+  tokenNumber?: number;
   paymentMethod: PaymentMethod;
+  paymentSplit?: PaymentSplit;
   amountTendered: number;
   changeDue: number;
   orderType: OrderType;
@@ -235,6 +251,7 @@ export interface KotTicket {
   ownerId: string;
   storeId: string;
   ticketNumber: string;
+  tokenNumber?: number;
   tableNumber: string;
   orderType: OrderType;
   ticketKind: KotTicketKind;

@@ -52,6 +52,7 @@ import {
 } from './types';
 import {
   formatMoney,
+  formatSalePaymentLabel,
   generateSafeId,
   getTodayDateKey,
   RESTAURANT_STARTER_PRODUCTS,
@@ -830,6 +831,7 @@ function POSWorkspace() {
         total: subtotal,
         totalCost,
         profit: subtotal - totalCost,
+        ...(typeof ticket.tokenNumber === 'number' ? { tokenNumber: ticket.tokenNumber } : {}),
         paymentMethod: 'cash',
         amountTendered: 0,
         changeDue: 0,
@@ -956,6 +958,9 @@ function POSWorkspace() {
         accentColor: payload.accentColor,
         currency: payload.currency,
         taxRate: payload.taxRate,
+        ...(payload.businessType === 'restaurant'
+          ? { serviceChargeRate: 0, defaultDeliveryFee: 0 }
+          : {}),
         address: payload.address,
         phone: payload.phone,
         receiptFooter: 'Thank you for your business!',
@@ -1540,7 +1545,7 @@ function POSWorkspace() {
                             {bill.employeeName ? ` (${bill.employeeName})` : ''}
                           </div>
                           <div className="text-xs text-emerald-800 dark:text-emerald-300 truncate">
-                            {bill.paymentMethod.replace('_', '/').toUpperCase()} · Total{' '}
+                            {formatSalePaymentLabel(bill, activeStore.currency)} · Total{' '}
                             <strong className="font-mono">
                               {formatMoney(bill.total, activeStore.currency)}
                             </strong>
@@ -1550,14 +1555,14 @@ function POSWorkspace() {
                                 <span className="font-mono">
                                   {formatMoney(bill.amountTendered, activeStore.currency)}
                                 </span>
-                                {bill.changeDue > 0 && (
-                                  <>
-                                    {' · '}Return{' '}
-                                    <span className="font-mono">
-                                      {formatMoney(bill.changeDue, activeStore.currency)}
-                                    </span>
-                                  </>
-                                )}
+                              </>
+                            )}
+                            {bill.changeDue > 0 && (
+                              <>
+                                {' · '}Return{' '}
+                                <span className="font-mono">
+                                  {formatMoney(bill.changeDue, activeStore.currency)}
+                                </span>
                               </>
                             )}
                           </div>
@@ -1630,6 +1635,7 @@ function POSWorkspace() {
                 <BillingView
                   store={activeStore}
                   products={products}
+                  sales={sales}
                   tableSessions={tableSessions}
                   kotTickets={kotTickets}
                   customers={customers}
