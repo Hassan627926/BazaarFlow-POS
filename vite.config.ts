@@ -82,8 +82,7 @@ export default defineConfig(() => {
           ],
         },
         devOptions: {
-          enabled: true,
-          type: 'module',
+          enabled: false,
         },
       }),
       // Copies src/assets into dist/ so root-relative URLs like
@@ -105,6 +104,30 @@ export default defineConfig(() => {
         },
       },
     ],
+    build: {
+      rollupOptions: {
+        output: {
+          manualChunks(id: string) {
+            if (id.includes('node_modules')) {
+              if (id.includes('firebase')) return 'vendor-firebase';
+              if (id.includes('recharts') || id.includes('d3-')) return 'vendor-charts';
+              if (
+                id.includes('jspdf') ||
+                id.includes('html2canvas') ||
+                id.includes('canvg') ||
+                id.includes('dompurify')
+              ) {
+                return 'vendor-pdf';
+              }
+              if (id.includes('jsbarcode')) return 'vendor-barcode';
+              if (id.includes('lucide-react')) return 'vendor-icons';
+              if (id.includes('react-dom') || id.includes('/react/')) return 'vendor-react';
+            }
+            return undefined;
+          },
+        },
+      },
+    },
     resolve: {
       alias: {
         '@': path.resolve(__dirname, '.'),

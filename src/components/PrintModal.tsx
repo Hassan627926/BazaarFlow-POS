@@ -9,7 +9,6 @@ import {
   getSaleTenderBreakdown,
   isProductStockTracked,
 } from '../utils/posHelpers';
-import { generateReceiptPdfFile, triggerPdfDownload } from '../utils/receiptPdf';
 import { BarcodeSvg } from './BarcodeSvg';
 
 interface PrintModalProps {
@@ -213,6 +212,7 @@ export const PrintModal: React.FC<PrintModalProps> = ({
     setPdfBusy(true);
     setPdfError(null);
     try {
+      const { generateReceiptPdfFile, triggerPdfDownload } = await import('../utils/receiptPdf');
       const { blob, filename } = await generateReceiptPdfFile(
         job.sale,
         store,
@@ -235,6 +235,7 @@ export const PrintModal: React.FC<PrintModalProps> = ({
     setPdfNotice(null);
 
     try {
+      const { generateReceiptPdfFile, triggerPdfDownload } = await import('../utils/receiptPdf');
       const { blob, file, filename } = await generateReceiptPdfFile(
         job.sale,
         store,

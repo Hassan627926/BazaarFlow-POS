@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { getRedirectResult, onAuthStateChanged, signOut, type User } from 'firebase/auth';
 import {
   Banknote,
@@ -65,22 +65,70 @@ import {
   playOrderReadyChime,
   triggerReadyVibration,
 } from './utils/soundAlert';
-import { AnalyticsView } from './components/AnalyticsView';
-import { AuthScreen } from './components/AuthScreen';
-import { BarcodeStudioView } from './components/BarcodeStudioView';
-import { BillingView } from './components/BillingView';
-import { EmployeesView } from './components/EmployeesView';
 import { ErrorBoundary } from './components/ErrorBoundary';
-import { InventoryView } from './components/InventoryView';
-import { KitchenKotQueueView } from './components/KitchenKotQueueView';
 import { OfflineIndicator } from './components/OfflineIndicator';
-import { PasswordSetupModal } from './components/PasswordSetupModal';
-import { PrintModal } from './components/PrintModal';
 import { PWAInstallButton } from './components/PWAInstallButton';
-import { SalesHistoryView } from './components/SalesHistoryView';
-import { SettingsView } from './components/SettingsView';
-import { StoreOnboardingModal, type NewStorePayload } from './components/StoreOnboardingModal';
-import { WaiterOrderView } from './components/WaiterOrderView';
+import type { NewStorePayload } from './components/StoreOnboardingModal';
+
+const AuthScreen = lazy(() =>
+  import('./components/AuthScreen').then((m) => ({ default: m.AuthScreen }))
+);
+const BillingView = lazy(() =>
+  import('./components/BillingView').then((m) => ({ default: m.BillingView }))
+);
+const WaiterOrderView = lazy(() =>
+  import('./components/WaiterOrderView').then((m) => ({ default: m.WaiterOrderView }))
+);
+const KitchenKotQueueView = lazy(() =>
+  import('./components/KitchenKotQueueView').then((m) => ({ default: m.KitchenKotQueueView }))
+);
+const InventoryView = lazy(() =>
+  import('./components/InventoryView').then((m) => ({ default: m.InventoryView }))
+);
+const BarcodeStudioView = lazy(() =>
+  import('./components/BarcodeStudioView').then((m) => ({ default: m.BarcodeStudioView }))
+);
+const SalesHistoryView = lazy(() =>
+  import('./components/SalesHistoryView').then((m) => ({ default: m.SalesHistoryView }))
+);
+const EmployeesView = lazy(() =>
+  import('./components/EmployeesView').then((m) => ({ default: m.EmployeesView }))
+);
+const AnalyticsView = lazy(() =>
+  import('./components/AnalyticsView').then((m) => ({ default: m.AnalyticsView }))
+);
+const SettingsView = lazy(() =>
+  import('./components/SettingsView').then((m) => ({ default: m.SettingsView }))
+);
+const PrintModal = lazy(() =>
+  import('./components/PrintModal').then((m) => ({ default: m.PrintModal }))
+);
+const StoreOnboardingModal = lazy(() =>
+  import('./components/StoreOnboardingModal').then((m) => ({ default: m.StoreOnboardingModal }))
+);
+const PasswordSetupModal = lazy(() =>
+  import('./components/PasswordSetupModal').then((m) => ({ default: m.PasswordSetupModal }))
+);
+
+function FullScreenLoader({ label = 'Loading BazaarFlow POS...' }: { label?: string }) {
+  return (
+    <div className="min-h-screen bg-slate-50 dark:bg-slate-950 flex items-center justify-center p-4">
+      <div className="flex flex-col items-center gap-3 text-center">
+        <div className="w-8 h-8 rounded-full border-2 border-slate-300 dark:border-slate-700 border-t-slate-900 dark:border-t-slate-100 animate-spin" />
+        <div className="text-sm font-medium text-slate-600 dark:text-slate-300">{label}</div>
+      </div>
+    </div>
+  );
+}
+
+function TabPanelLoader() {
+  return (
+    <div className="py-16 flex flex-col items-center justify-center gap-2.5 text-slate-500 dark:text-slate-400">
+      <div className="w-6 h-6 rounded-full border-2 border-slate-300 dark:border-slate-700 border-t-slate-700 dark:border-t-slate-200 animate-spin" />
+      <span className="text-xs font-medium">Loading section...</span>
+    </div>
+  );
+}
 
 function POSWorkspace() {
   const [user, setUser] = useState<User | null>(null);
@@ -384,11 +432,16 @@ function POSWorkspace() {
     }
 
     let cancelled = false;
-    setWaiterMemberReady(false);
+    const storeId = activeWaiterGrant.storeId;
+    const boundCacheKey = `bf_waiter_bound_${storeId}_${user.uid}_${activeWaiterGrant.id}`;
+    const hasCachedBinding =
+      typeof window !== 'undefined' && window.localStorage.getItem(boundCacheKey) === '1';
+
+    // Let returning waiters hydrate store/menu/tables in parallel instead of blocking on a serial getDoc
+    setWaiterMemberReady(hasCachedBinding);
     setWaiterSyncError(null);
 
     const bindMember = async () => {
-      const storeId = activeWaiterGrant.storeId;
       const memberRef = doc(db, 'stores', storeId, 'waiterMembers', user.uid);
       const emailLower = user.email!.trim().toLowerCase();
       try {
@@ -424,11 +477,18 @@ function POSWorkspace() {
             updatedAt: serverTimestamp(),
           });
         }
+        if (typeof window !== 'undefined') {
+          window.localStorage.setItem(boundCacheKey, '1');
+        }
         if (!cancelled) {
           setWaiterMemberReady(true);
         }
       } catch (err) {
+        if (typeof window !== 'undefined') {
+          window.localStorage.removeItem(boundCacheKey);
+        }
         if (!cancelled) {
+          setWaiterMemberReady(false);
           const rawMsg =
             err instanceof Error ? err.message : 'Unable to activate waiter mobile session.';
           setWaiterSyncError(
@@ -592,43 +652,27 @@ function POSWorkspace() {
     }
   }, [activeStore, activeTab, isStandaloneWaiterMode]);
 
-  // Subscribe to active store's products, sales, stockLogs, tables, customers, employees, and kotQueue
+  const activeStoreBusinessType = activeStore?.businessType ?? null;
+
+  // Subscribe to core active store collections (products, sales, employees)
   useEffect(() => {
     if (!user || !activeStoreId || isStandaloneWaiterMode) {
       setProducts([]);
       setSales([]);
-      setStockLogs([]);
-      setTableSessions([]);
-      setCustomers([]);
       setEmployees([]);
-      setKotTickets([]);
       setRecentWaiterBills([]);
-      kotHydratedRef.current = false;
-      seenPendingKotIdsRef.current.clear();
-      ownerReadyHydratedRef.current = false;
-      seenOwnerReadyKotIdsRef.current.clear();
-      autoDispatchedKotIdsRef.current.clear();
       salesHydratedRef.current = false;
       seenWaiterBillIdsRef.current.clear();
       return;
     }
 
-    kotHydratedRef.current = false;
-    seenPendingKotIdsRef.current.clear();
-    ownerReadyHydratedRef.current = false;
-    seenOwnerReadyKotIdsRef.current.clear();
-    autoDispatchedKotIdsRef.current.clear();
     salesHydratedRef.current = false;
     seenWaiterBillIdsRef.current.clear();
     setRecentWaiterBills([]);
 
     const productsPath = `stores/${activeStoreId}/products`;
     const salesPath = `stores/${activeStoreId}/sales`;
-    const logsPath = `stores/${activeStoreId}/stockLogs`;
-    const tablesPath = `stores/${activeStoreId}/tables`;
-    const customersPath = `stores/${activeStoreId}/customers`;
     const employeesPath = `stores/${activeStoreId}/employees`;
-    const kotQueuePath = `stores/${activeStoreId}/kotQueue`;
 
     const unsubProducts = onSnapshot(
       query(collection(db, productsPath), where('ownerId', '==', user.uid)),
@@ -683,22 +727,52 @@ function POSWorkspace() {
       (err) => reportSnapshotError(err, OperationType.LIST, salesPath)
     );
 
-    const unsubLogs = onSnapshot(
-      query(collection(db, logsPath), where('ownerId', '==', user.uid)),
+    const unsubEmployees = onSnapshot(
+      query(collection(db, employeesPath), where('ownerId', '==', user.uid)),
       (snap) => {
-        const list: StockLog[] = snap.docs.map((d) => ({
+        const list: Employee[] = snap.docs.map((d) => ({
           id: d.id,
-          ...(d.data() as Omit<StockLog, 'id'>),
+          ...(d.data() as Omit<Employee, 'id'>),
         }));
-        list.sort((a, b) => {
-          const tA = a.createdAt?.toMillis?.() ?? 0;
-          const tB = b.createdAt?.toMillis?.() ?? 0;
-          return tB - tA;
-        });
-        setStockLogs(list);
+        list.sort((a, b) => a.name.localeCompare(b.name));
+        setEmployees(list);
       },
-      (err) => reportSnapshotError(err, OperationType.LIST, logsPath)
+      (err) => reportSnapshotError(err, OperationType.LIST, employeesPath)
     );
+
+    return () => {
+      unsubProducts();
+      unsubSales();
+      unsubEmployees();
+    };
+  }, [user, activeStoreId, isStandaloneWaiterMode]);
+
+  // Subscribe to tables & kotQueue ONLY when active store is a restaurant
+  useEffect(() => {
+    if (
+      !user ||
+      !activeStoreId ||
+      isStandaloneWaiterMode ||
+      activeStoreBusinessType !== 'restaurant'
+    ) {
+      setTableSessions([]);
+      setKotTickets([]);
+      kotHydratedRef.current = false;
+      seenPendingKotIdsRef.current.clear();
+      ownerReadyHydratedRef.current = false;
+      seenOwnerReadyKotIdsRef.current.clear();
+      autoDispatchedKotIdsRef.current.clear();
+      return;
+    }
+
+    kotHydratedRef.current = false;
+    seenPendingKotIdsRef.current.clear();
+    ownerReadyHydratedRef.current = false;
+    seenOwnerReadyKotIdsRef.current.clear();
+    autoDispatchedKotIdsRef.current.clear();
+
+    const tablesPath = `stores/${activeStoreId}/tables`;
+    const kotQueuePath = `stores/${activeStoreId}/kotQueue`;
 
     const unsubTables = onSnapshot(
       query(collection(db, tablesPath), where('ownerId', '==', user.uid)),
@@ -711,31 +785,6 @@ function POSWorkspace() {
         setTableSessions(list);
       },
       (err) => reportSnapshotError(err, OperationType.LIST, tablesPath)
-    );
-
-    const unsubCustomers = onSnapshot(
-      query(collection(db, customersPath), where('ownerId', '==', user.uid)),
-      (snap) => {
-        const list: Customer[] = snap.docs.map((d) => ({
-          id: d.id,
-          ...(d.data() as Omit<Customer, 'id'>),
-        }));
-        setCustomers(list);
-      },
-      (err) => reportSnapshotError(err, OperationType.LIST, customersPath)
-    );
-
-    const unsubEmployees = onSnapshot(
-      query(collection(db, employeesPath), where('ownerId', '==', user.uid)),
-      (snap) => {
-        const list: Employee[] = snap.docs.map((d) => ({
-          id: d.id,
-          ...(d.data() as Omit<Employee, 'id'>),
-        }));
-        list.sort((a, b) => a.name.localeCompare(b.name));
-        setEmployees(list);
-      },
-      (err) => reportSnapshotError(err, OperationType.LIST, employeesPath)
     );
 
     const unsubKotQueue = onSnapshot(
@@ -790,15 +839,61 @@ function POSWorkspace() {
     );
 
     return () => {
-      unsubProducts();
-      unsubSales();
-      unsubLogs();
       unsubTables();
-      unsubCustomers();
-      unsubEmployees();
       unsubKotQueue();
     };
-  }, [user, activeStoreId, isStandaloneWaiterMode]);
+  }, [user, activeStoreId, isStandaloneWaiterMode, activeStoreBusinessType]);
+
+  // Subscribe to customers ONLY when POS Billing tab is active
+  useEffect(() => {
+    if (!user || !activeStoreId || isStandaloneWaiterMode || activeTab !== 'billing') {
+      setCustomers([]);
+      return;
+    }
+
+    const customersPath = `stores/${activeStoreId}/customers`;
+    const unsubCustomers = onSnapshot(
+      query(collection(db, customersPath), where('ownerId', '==', user.uid)),
+      (snap) => {
+        const list: Customer[] = snap.docs.map((d) => ({
+          id: d.id,
+          ...(d.data() as Omit<Customer, 'id'>),
+        }));
+        setCustomers(list);
+      },
+      (err) => reportSnapshotError(err, OperationType.LIST, customersPath)
+    );
+
+    return () => unsubCustomers();
+  }, [user, activeStoreId, isStandaloneWaiterMode, activeTab]);
+
+  // Defer stockLogs subscription until user opens Inventory & Stock tab
+  useEffect(() => {
+    if (!user || !activeStoreId || isStandaloneWaiterMode || activeTab !== 'inventory') {
+      setStockLogs([]);
+      return;
+    }
+
+    const logsPath = `stores/${activeStoreId}/stockLogs`;
+    const unsubLogs = onSnapshot(
+      query(collection(db, logsPath), where('ownerId', '==', user.uid)),
+      (snap) => {
+        const list: StockLog[] = snap.docs.map((d) => ({
+          id: d.id,
+          ...(d.data() as Omit<StockLog, 'id'>),
+        }));
+        list.sort((a, b) => {
+          const tA = a.createdAt?.toMillis?.() ?? 0;
+          const tB = b.createdAt?.toMillis?.() ?? 0;
+          return tB - tA;
+        });
+        setStockLogs(list);
+      },
+      (err) => reportSnapshotError(err, OperationType.LIST, logsPath)
+    );
+
+    return () => unsubLogs();
+  }, [user, activeStoreId, isStandaloneWaiterMode, activeTab]);
 
   const pendingKotTickets = useMemo(() => {
     return kotTickets
@@ -1010,41 +1105,37 @@ function POSWorkspace() {
   }
 
   if (!authReady) {
-    return (
-      <div className="min-h-screen bg-slate-50 dark:bg-slate-950 flex items-center justify-center">
-        <div className="text-sm text-slate-500 dark:text-slate-400">Loading BazaarFlow POS...</div>
-      </div>
-    );
+    return <FullScreenLoader />;
   }
 
   if (!user) {
     return (
       <>
-        <AuthScreen
-          darkMode={darkMode}
-          onToggleDarkMode={() => setDarkMode((v) => !v)}
-          onSignedIn={(signedInUser, mode) => {
-            if (typeof window !== 'undefined') {
-              window.sessionStorage.setItem('bazaarflow_login_mode', mode);
-            }
-            setPreferWaiterMode(mode === 'waiter');
-            setUser(signedInUser);
-          }}
-        />
+        <Suspense fallback={<FullScreenLoader />}>
+          <AuthScreen
+            darkMode={darkMode}
+            onToggleDarkMode={() => setDarkMode((v) => !v)}
+            onSignedIn={(signedInUser, mode) => {
+              if (typeof window !== 'undefined') {
+                window.sessionStorage.setItem('bazaarflow_login_mode', mode);
+              }
+              setPreferWaiterMode(mode === 'waiter');
+              setUser(signedInUser);
+            }}
+          />
+        </Suspense>
         <OfflineIndicator />
       </>
     );
   }
 
-  // Wait for both stores and waiter grants before routing so waiters never flash the Owner onboarding modal
-  if (!storesLoaded || !waiterGrantsLoaded) {
-    return (
-      <div className="min-h-screen bg-slate-50 dark:bg-slate-950 flex items-center justify-center">
-        <div className="text-sm text-slate-500 dark:text-slate-400">
-          Loading BazaarFlow POS...
-        </div>
-      </div>
-    );
+  // Only block routing until the active login path (Owner vs Waiter) can be determined safely
+  const routingReady =
+    (preferWaiterMode && waiterGrantsLoaded && (Boolean(activeWaiterGrant) || storesLoaded)) ||
+    (!preferWaiterMode && storesLoaded && (stores.length > 0 || waiterGrantsLoaded));
+
+  if (!routingReady) {
+    return <FullScreenLoader />;
   }
 
   // Standalone Waiter Mobile App mode
@@ -1092,7 +1183,8 @@ function POSWorkspace() {
     if (!waiterMemberReady || !waiterStore) {
       return (
         <div className="min-h-screen bg-slate-50 dark:bg-slate-950 flex items-center justify-center p-4">
-          <div className="text-center space-y-2">
+          <div className="flex flex-col items-center gap-3 text-center">
+            <div className="w-8 h-8 rounded-full border-2 border-slate-300 dark:border-slate-700 border-t-slate-900 dark:border-t-slate-100 animate-spin" />
             <div className="text-sm font-semibold text-slate-800 dark:text-slate-200">
               Connecting to {activeWaiterGrant.storeName}...
             </div>
@@ -1106,41 +1198,51 @@ function POSWorkspace() {
 
     return (
       <>
-        <WaiterOrderView
-          standalone
-          store={waiterStore}
-          products={waiterProducts}
-          tableSessions={waiterTables}
-          kotTickets={waiterKotTickets}
-          waiterGrant={activeWaiterGrant}
-          darkMode={darkMode}
-          onToggleDarkMode={() => setDarkMode((v) => !v)}
-          onSignOut={() => void signOut(auth)}
-          onSwitchToOwner={
-            stores.length > 0
-              ? () => {
-                  if (typeof window !== 'undefined') {
-                    window.sessionStorage.setItem('bazaarflow_login_mode', 'owner');
+        <Suspense fallback={<FullScreenLoader label={`Opening ${waiterStore.name}...`} />}>
+          <WaiterOrderView
+            standalone
+            store={waiterStore}
+            products={waiterProducts}
+            tableSessions={waiterTables}
+            kotTickets={waiterKotTickets}
+            waiterGrant={activeWaiterGrant}
+            darkMode={darkMode}
+            onToggleDarkMode={() => setDarkMode((v) => !v)}
+            onSignOut={() => void signOut(auth)}
+            onSwitchToOwner={
+              stores.length > 0
+                ? () => {
+                    if (typeof window !== 'undefined') {
+                      window.sessionStorage.setItem('bazaarflow_login_mode', 'owner');
+                    }
+                    setPreferWaiterMode(false);
                   }
-                  setPreferWaiterMode(false);
-                }
-              : undefined
-          }
-          hasPassword={hasPasswordProvider}
-          onOpenPasswordSetup={() => setPasswordModalOpen(true)}
-          onPrintJob={setPrintJob}
-          onUpdateKitchenStatus={(kotId, nextStatus) =>
-            handleUpdateKotKitchenStatus(waiterStore.id, kotId, nextStatus, true)
-          }
-        />
-        <PasswordSetupModal
-          user={user}
-          isOpen={passwordModalOpen}
-          hasPasswordProvider={hasPasswordProvider}
-          onClose={handleClosePasswordModal}
-          onPasswordSaved={() => setPasswordLinkedTick((t) => t + 1)}
-        />
-        <PrintModal job={printJob} store={waiterStore} onClose={() => setPrintJob(null)} />
+                : undefined
+            }
+            hasPassword={hasPasswordProvider}
+            onOpenPasswordSetup={() => setPasswordModalOpen(true)}
+            onPrintJob={setPrintJob}
+            onUpdateKitchenStatus={(kotId, nextStatus) =>
+              handleUpdateKotKitchenStatus(waiterStore.id, kotId, nextStatus, true)
+            }
+          />
+        </Suspense>
+        {passwordModalOpen && (
+          <Suspense fallback={null}>
+            <PasswordSetupModal
+              user={user}
+              isOpen={passwordModalOpen}
+              hasPasswordProvider={hasPasswordProvider}
+              onClose={handleClosePasswordModal}
+              onPasswordSaved={() => setPasswordLinkedTick((t) => t + 1)}
+            />
+          </Suspense>
+        )}
+        {printJob && (
+          <Suspense fallback={null}>
+            <PrintModal job={printJob} store={waiterStore} onClose={() => setPrintJob(null)} />
+          </Suspense>
+        )}
         <OfflineIndicator />
       </>
     );
@@ -1631,107 +1733,109 @@ function POSWorkspace() {
                   </div>
                 </div>
               )}
-              {activeTab === 'billing' && (
-                <BillingView
-                  store={activeStore}
-                  products={products}
-                  sales={sales}
-                  tableSessions={tableSessions}
-                  kotTickets={kotTickets}
-                  customers={customers}
-                  employees={employees}
-                  ownerId={user.uid}
-                  onPrintJob={setPrintJob}
-                  onUpdateKitchenStatus={(kotId, nextStatus) =>
-                    handleUpdateKotKitchenStatus(activeStore.id, kotId, nextStatus, true)
-                  }
-                  onGoToInventory={() => setActiveTab('inventory')}
-                  onGoToEmployees={() => setActiveTab('employees')}
-                />
-              )}
-              {activeTab === 'waiter' && !isRetail && (
-                <WaiterOrderView
-                  store={activeStore}
-                  products={products}
-                  tableSessions={tableSessions}
-                  kotTickets={kotTickets}
-                  employees={employees}
-                  onPrintJob={setPrintJob}
-                  onUpdateKitchenStatus={(kotId, nextStatus) =>
-                    handleUpdateKotKitchenStatus(activeStore.id, kotId, nextStatus, true)
-                  }
-                />
-              )}
-              {activeTab === 'kot_queue' && !isRetail && (
-                <KitchenKotQueueView
-                  store={activeStore}
-                  tickets={kotTickets}
-                  soundEnabled={kotSoundEnabled}
-                  onToggleSound={() => setKotSoundEnabled((v) => !v)}
-                  autoPrintEnabled={kotAutoPrint}
-                  onToggleAutoPrint={() => setKotAutoPrint((v) => !v)}
-                  onPrintTicket={handlePrintKotTicket}
-                  onMarkPrinted={handleMarkKotPrinted}
-                  onUpdateKitchenStatus={(kotId, nextStatus) =>
-                    handleUpdateKotKitchenStatus(activeStore.id, kotId, nextStatus, true)
-                  }
-                  onClearPrinted={handleClearPrintedKots}
-                  onTestBell={playKitchenBellChime}
-                />
-              )}
-              {activeTab === 'inventory' && (
-                <InventoryView
-                  store={activeStore}
-                  products={products}
-                  stockLogs={stockLogs}
-                  ownerId={user.uid}
-                />
-              )}
-              {activeTab === 'barcodes' && isRetail && (
-                <BarcodeStudioView
-                  store={activeStore}
-                  products={products}
-                  onPrintJob={setPrintJob}
-                />
-              )}
-              {activeTab === 'sales' && (
-                <SalesHistoryView
-                  store={activeStore}
-                  sales={sales}
-                  products={products}
-                  employees={employees}
-                  ownerId={user.uid}
-                  onPrintJob={setPrintJob}
-                />
-              )}
-              {activeTab === 'employees' && (
-                <EmployeesView
-                  store={activeStore}
-                  employees={employees}
-                  sales={sales}
-                  tableSessions={tableSessions}
-                  ownerId={user.uid}
-                />
-              )}
-              {activeTab === 'analytics' && (
-                <AnalyticsView
-                  store={activeStore}
-                  sales={sales}
-                  products={products}
-                  employees={employees}
-                  onPrintJob={setPrintJob}
-                />
-              )}
-              {activeTab === 'settings' && (
-                <SettingsView
-                  store={activeStore}
-                  darkMode={darkMode}
-                  onToggleDarkMode={() => setDarkMode((v) => !v)}
-                  userEmail={user.email}
-                  hasPassword={hasPasswordProvider}
-                  onOpenPasswordSetup={() => setPasswordModalOpen(true)}
-                />
-              )}
+              <Suspense fallback={<TabPanelLoader />}>
+                {activeTab === 'billing' && (
+                  <BillingView
+                    store={activeStore}
+                    products={products}
+                    sales={sales}
+                    tableSessions={tableSessions}
+                    kotTickets={kotTickets}
+                    customers={customers}
+                    employees={employees}
+                    ownerId={user.uid}
+                    onPrintJob={setPrintJob}
+                    onUpdateKitchenStatus={(kotId, nextStatus) =>
+                      handleUpdateKotKitchenStatus(activeStore.id, kotId, nextStatus, true)
+                    }
+                    onGoToInventory={() => setActiveTab('inventory')}
+                    onGoToEmployees={() => setActiveTab('employees')}
+                  />
+                )}
+                {activeTab === 'waiter' && !isRetail && (
+                  <WaiterOrderView
+                    store={activeStore}
+                    products={products}
+                    tableSessions={tableSessions}
+                    kotTickets={kotTickets}
+                    employees={employees}
+                    onPrintJob={setPrintJob}
+                    onUpdateKitchenStatus={(kotId, nextStatus) =>
+                      handleUpdateKotKitchenStatus(activeStore.id, kotId, nextStatus, true)
+                    }
+                  />
+                )}
+                {activeTab === 'kot_queue' && !isRetail && (
+                  <KitchenKotQueueView
+                    store={activeStore}
+                    tickets={kotTickets}
+                    soundEnabled={kotSoundEnabled}
+                    onToggleSound={() => setKotSoundEnabled((v) => !v)}
+                    autoPrintEnabled={kotAutoPrint}
+                    onToggleAutoPrint={() => setKotAutoPrint((v) => !v)}
+                    onPrintTicket={handlePrintKotTicket}
+                    onMarkPrinted={handleMarkKotPrinted}
+                    onUpdateKitchenStatus={(kotId, nextStatus) =>
+                      handleUpdateKotKitchenStatus(activeStore.id, kotId, nextStatus, true)
+                    }
+                    onClearPrinted={handleClearPrintedKots}
+                    onTestBell={playKitchenBellChime}
+                  />
+                )}
+                {activeTab === 'inventory' && (
+                  <InventoryView
+                    store={activeStore}
+                    products={products}
+                    stockLogs={stockLogs}
+                    ownerId={user.uid}
+                  />
+                )}
+                {activeTab === 'barcodes' && isRetail && (
+                  <BarcodeStudioView
+                    store={activeStore}
+                    products={products}
+                    onPrintJob={setPrintJob}
+                  />
+                )}
+                {activeTab === 'sales' && (
+                  <SalesHistoryView
+                    store={activeStore}
+                    sales={sales}
+                    products={products}
+                    employees={employees}
+                    ownerId={user.uid}
+                    onPrintJob={setPrintJob}
+                  />
+                )}
+                {activeTab === 'employees' && (
+                  <EmployeesView
+                    store={activeStore}
+                    employees={employees}
+                    sales={sales}
+                    tableSessions={tableSessions}
+                    ownerId={user.uid}
+                  />
+                )}
+                {activeTab === 'analytics' && (
+                  <AnalyticsView
+                    store={activeStore}
+                    sales={sales}
+                    products={products}
+                    employees={employees}
+                    onPrintJob={setPrintJob}
+                  />
+                )}
+                {activeTab === 'settings' && (
+                  <SettingsView
+                    store={activeStore}
+                    darkMode={darkMode}
+                    onToggleDarkMode={() => setDarkMode((v) => !v)}
+                    userEmail={user.email}
+                    hasPassword={hasPasswordProvider}
+                    onOpenPasswordSetup={() => setPasswordModalOpen(true)}
+                  />
+                )}
+              </Suspense>
             </>
           )}
           </div>
@@ -1739,30 +1843,40 @@ function POSWorkspace() {
       </div>
 
       {/* Onboarding Modal (auto-opens if signed-in owner has zero stores and no waiter grant) */}
-      <StoreOnboardingModal
-        isOpen={onboardingRequired}
-        canClose={stores.length > 0}
-        onClose={() => setCreateStoreOpen(false)}
-        onCreate={handleCreateStore}
-      />
+      {onboardingRequired && (
+        <Suspense fallback={null}>
+          <StoreOnboardingModal
+            isOpen={onboardingRequired}
+            canClose={stores.length > 0}
+            onClose={() => setCreateStoreOpen(false)}
+            onCreate={handleCreateStore}
+          />
+        </Suspense>
+      )}
 
       {/* Post-Sign-In Create / Change Password Modal */}
-      <PasswordSetupModal
-        user={user}
-        isOpen={passwordModalOpen}
-        hasPasswordProvider={hasPasswordProvider}
-        onClose={handleClosePasswordModal}
-        onPasswordSaved={() => setPasswordLinkedTick((t) => t + 1)}
-      />
+      {passwordModalOpen && (
+        <Suspense fallback={null}>
+          <PasswordSetupModal
+            user={user}
+            isOpen={passwordModalOpen}
+            hasPasswordProvider={hasPasswordProvider}
+            onClose={handleClosePasswordModal}
+            onPasswordSaved={() => setPasswordLinkedTick((t) => t + 1)}
+          />
+        </Suspense>
+      )}
 
       {/* Unified Thermal Receipt, KOT, Barcode Sheet & Daily Z-Report Printer */}
-      {activeStore && (
-        <PrintModal
-          job={printJob}
-          store={activeStore}
-          onClose={() => setPrintJob(null)}
-          onMarkKotPrinted={(kotId) => void handleMarkKotPrinted(kotId)}
-        />
+      {activeStore && printJob && (
+        <Suspense fallback={null}>
+          <PrintModal
+            job={printJob}
+            store={activeStore}
+            onClose={() => setPrintJob(null)}
+            onMarkKotPrinted={(kotId) => void handleMarkKotPrinted(kotId)}
+          />
+        </Suspense>
       )}
 
       <OfflineIndicator />
