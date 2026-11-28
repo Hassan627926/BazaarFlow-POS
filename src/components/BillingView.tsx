@@ -211,6 +211,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
   const [transferError, setTransferError] = useState<string | null>(null);
 
   const [processing, setProcessing] = useState(false);
+  const [busyKotId, setBusyKotId] = useState<string | null>(null);
   const [checkoutError, setCheckoutError] = useState<string | null>(null);
   const [statusNotice, setStatusNotice] = useState<string | null>(null);
   const [mobileCartOpen, setMobileCartOpen] = useState(false);
@@ -339,6 +340,29 @@ export const BillingView: React.FC<BillingViewProps> = ({
   const showTempNotice = (msg: string) => {
     setStatusNotice(msg);
     window.setTimeout(() => setStatusNotice(null), 3200);
+  };
+
+  const formatFirestoreActionError = (err: unknown, fallback: string) => {
+    const rawMsg = err instanceof Error ? err.message : String(err ?? '');
+    if (rawMsg.toLowerCase().includes('permission')) {
+      return 'Firestore permission denied: please publish the latest firestore.rules in Firebase Console → Firestore Database → Rules.';
+    }
+    return rawMsg || fallback;
+  };
+
+  const handleUpdateTableKotStatus = async (kotId: string, nextStatus: KotKitchenStatus) => {
+    if (!onUpdateKitchenStatus) return;
+    setBusyKotId(kotId);
+    setCheckoutError(null);
+    try {
+      await onUpdateKitchenStatus(kotId, nextStatus);
+    } catch (err) {
+      setCheckoutError(
+        formatFirestoreActionError(err, 'Unable to update kitchen order status.')
+      );
+    } finally {
+      setBusyKotId(null);
+    }
   };
 
   const handleOrderTypeSwitch = (nextType: OrderType) => {
@@ -1297,7 +1321,17 @@ export const BillingView: React.FC<BillingViewProps> = ({
       );
       onPrintJob({ type: 'kot', sale: kotSalePreview, isAddOn, kotId });
     } catch (err) {
-      handleFirestoreError(err, isAddOn ? OperationType.UPDATE : OperationType.CREATE, tablePath);
+      setCheckoutError(
+        formatFirestoreActionError(
+          err,
+          isAddOn ? 'Unable to update table order.' : 'Unable to book table.'
+        )
+      );
+      try {
+        handleFirestoreError(err, isAddOn ? OperationType.UPDATE : OperationType.CREATE, tablePath);
+      } catch {
+        // Logged & surfaced in checkoutError
+      }
     } finally {
       setProcessing(false);
     }
@@ -2087,22 +2121,9 @@ export const BillingView: React.FC<BillingViewProps> = ({
         });
       });
 
-      // If settling an occupied dine-in table, clear the table and mark its kitchen KOTs served
+      // If settling an occupied dine-in table, clear the table in the atomic settlement batch
       if (activeTableSession) {
         batch.delete(doc(db, 'stores', store.id, 'tables', activeTableSession.id));
-        kotTickets
-          .filter(
-            (t) =>
-              t.tableNumber === activeTableSession.tableNumber &&
-              t.ticketKind !== 'reprint' &&
-              t.kitchenStatus !== 'served'
-          )
-          .forEach((t) => {
-            batch.update(doc(db, 'stores', store.id, 'kotQueue', t.id), {
-              kitchenStatus: 'served',
-              updatedAt: serverTimestamp(),
-            });
-          });
       }
 
       // Save or update Customer history whenever phone & name are provided (especially Delivery & Takeaway)
@@ -2134,6 +2155,35 @@ export const BillingView: React.FC<BillingViewProps> = ({
       }
 
       await batch.commit();
+
+      // Mark any active kitchen KOTs for the settled table as served (non-blocking so missing/stale KOTs never block billing)
+      let kotSyncWarning: string | null = null;
+      if (activeTableSession) {
+        const tableKotsToServe = kotTickets.filter(
+          (t) =>
+            t.tableNumber === activeTableSession.tableNumber &&
+            t.ticketKind !== 'reprint' &&
+            t.kitchenStatus !== 'served'
+        );
+        if (tableKotsToServe.length > 0) {
+          try {
+            const kotBatch = writeBatch(db);
+            tableKotsToServe.forEach((t) => {
+              kotBatch.update(doc(db, 'stores', store.id, 'kotQueue', t.id), {
+                kitchenStatus: 'served',
+                updatedAt: serverTimestamp(),
+              });
+            });
+            await kotBatch.commit();
+          } catch (kotErr) {
+            const rawKotMsg = kotErr instanceof Error ? kotErr.message : String(kotErr ?? '');
+            if (rawKotMsg.toLowerCase().includes('permission')) {
+              kotSyncWarning =
+                'Table settled, but KOT status could not be marked Served — please publish the latest firestore.rules in Firebase Console.';
+            }
+          }
+        }
+      }
 
       const completedSale: Sale = {
         id: saleId,
@@ -2172,6 +2222,9 @@ export const BillingView: React.FC<BillingViewProps> = ({
 
       setLastCompletedSale(completedSale);
       clearCart(false);
+      if (kotSyncWarning) {
+        setCheckoutError(kotSyncWarning);
+      }
       setMobileCartOpen(false);
       if (autoPrint) {
         onPrintJob({ type: 'receipt', sale: completedSale });
@@ -2183,7 +2236,17 @@ export const BillingView: React.FC<BillingViewProps> = ({
         );
       }
     } catch (err) {
-      handleFirestoreError(err, OperationType.WRITE, salePath);
+      setCheckoutError(
+        formatFirestoreActionError(
+          err,
+          activeTableSession ? 'Unable to settle table bill.' : 'Unable to complete bill.'
+        )
+      );
+      try {
+        handleFirestoreError(err, OperationType.WRITE, salePath);
+      } catch {
+        // Logged & surfaced in checkoutError
+      }
     } finally {
       setProcessing(false);
     }
@@ -2714,17 +2777,24 @@ export const BillingView: React.FC<BillingViewProps> = ({
                           {onUpdateKitchenStatus && (
                             <button
                               type="button"
+                              disabled={busyKotId === kt.id}
                               onClick={() =>
-                                void onUpdateKitchenStatus(kt.id, isReady ? 'served' : 'ready')
+                                void handleUpdateTableKotStatus(kt.id, isReady ? 'served' : 'ready')
                               }
-                              className={`inline-flex items-center gap-1 rounded px-2 py-0.5 font-semibold text-white shrink-0 cursor-pointer ${
+                              className={`inline-flex items-center gap-1 rounded px-2 py-0.5 font-semibold text-white shrink-0 disabled:opacity-50 cursor-pointer ${
                                 isReady
                                   ? 'bg-slate-900 dark:bg-slate-100 dark:text-slate-900'
                                   : 'bg-emerald-600 hover:bg-emerald-700'
                               }`}
                             >
                               <CheckCheck className="w-3 h-3" />
-                              <span>{isReady ? 'Served' : 'Mark Ready'}</span>
+                              <span>
+                                {busyKotId === kt.id
+                                  ? 'Updating...'
+                                  : isReady
+                                  ? 'Served'
+                                  : 'Mark Ready'}
+                              </span>
                             </button>
                           )}
                         </div>

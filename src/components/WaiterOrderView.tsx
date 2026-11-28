@@ -343,8 +343,16 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
   const handleMarkKotServed = async (kotId: string) => {
     if (!onUpdateKitchenStatus) return;
     setBusyKotId(kotId);
+    setErrorMsg(null);
     try {
       await onUpdateKitchenStatus(kotId, 'served');
+    } catch (err) {
+      const rawMsg = err instanceof Error ? err.message : String(err ?? '');
+      setErrorMsg(
+        rawMsg.toLowerCase().includes('permission')
+          ? 'Firestore permission denied: please ask the Owner to publish the latest firestore.rules in Firebase Console.'
+          : rawMsg || 'Unable to mark order as served.'
+      );
     } finally {
       setBusyKotId(null);
     }
@@ -636,20 +644,28 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
         updatedAt: serverTimestamp(),
       });
       batch.delete(doc(db, 'stores', store.id, 'tables', tableId));
-      kotTickets
-        .filter(
-          (t) =>
-            t.tableNumber === selectedTable &&
-            t.ticketKind !== 'reprint' &&
-            t.kitchenStatus !== 'served'
-        )
-        .forEach((t) => {
-          batch.update(doc(db, 'stores', store.id, 'kotQueue', t.id), {
-            kitchenStatus: 'served',
-            updatedAt: serverTimestamp(),
-          });
-        });
       await batch.commit();
+
+      const kotsToServe = kotTickets.filter(
+        (t) =>
+          t.tableNumber === selectedTable &&
+          t.ticketKind !== 'reprint' &&
+          t.kitchenStatus !== 'served'
+      );
+      if (kotsToServe.length > 0) {
+        try {
+          const kotBatch = writeBatch(db);
+          kotsToServe.forEach((t) => {
+            kotBatch.update(doc(db, 'stores', store.id, 'kotQueue', t.id), {
+              kitchenStatus: 'served',
+              updatedAt: serverTimestamp(),
+            });
+          });
+          await kotBatch.commit();
+        } catch {
+          // Non-blocking: bill is settled and table is cleared even if KOT sync is skipped
+        }
+      }
 
       const receiptSale: Sale = {
         id: saleId,
@@ -668,12 +684,18 @@ export const WaiterOrderView: React.FC<WaiterOrderViewProps> = ({
         { type: 'receipt', sale: receiptSale }
       );
     } catch (err) {
+      const rawMsg = err instanceof Error ? err.message : '';
       setBillError(
-        err instanceof Error
-          ? err.message
-          : 'Unable to complete table bill. Ask the Owner to check Waiter Bill Settlement access & Firestore rules.'
+        rawMsg.toLowerCase().includes('permission')
+          ? 'Firestore permission denied: please publish the latest firestore.rules in Firebase Console → Firestore Database → Rules.'
+          : rawMsg ||
+              'Unable to complete table bill. Ask the Owner to check Waiter Bill Settlement access & Firestore rules.'
       );
-      handleFirestoreError(err, OperationType.CREATE, salePath);
+      try {
+        handleFirestoreError(err, OperationType.CREATE, salePath);
+      } catch {
+        // Already surfaced in billError
+      }
     } finally {
       setSettlingBill(false);
     }
